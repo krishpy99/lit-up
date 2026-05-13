@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { cardShort, type Card } from "@lit-up/shared";
   import Avatar from "./Avatar.svelte";
-  import type { LastAskSnapshot, PlayerSnapshot, RoomSnapshot } from "../lib/client.svelte";
+  import type { PlayerSnapshot, RoomSnapshot } from "../lib/client.svelte";
 
   interface Props {
     player: PlayerSnapshot;
@@ -68,11 +67,6 @@
   let isPendingTgt = $derived(room.pendingBotAsk?.targetId === player.id);
   let pendingInfo  = $derived(
     isPendingAsk && room.pendingBotAsk ? cardShort(room.pendingBotAsk.card) : null,
-  );
-  let recentAsk    = $derived<LastAskSnapshot | null>(
-    room.lastAsk?.askerId === player.id && Date.now() - room.lastAsk.at < 4500
-      ? room.lastAsk
-      : null,
   );
 
   /**
@@ -167,16 +161,6 @@
     {:else if player.cardCount === 0}
       <!-- Surface the empty state on YOU even though the fan is gone. -->
       <span class="card-stack-empty">Empty</span>
-    {/if}
-
-    {#if recentAsk}
-      {@const info = cardShort(recentAsk.card as Card)}
-      <div
-        class="seat-last-ask {recentAsk.success ? 'success' : 'fail'}"
-        style="color:{info.red ? 'var(--card-red)' : 'var(--card-black)'};"
-      >
-        {info.rank}{info.symbol}
-      </div>
     {/if}
 
     {#if canPassHere}

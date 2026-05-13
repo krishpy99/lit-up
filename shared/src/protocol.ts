@@ -136,5 +136,5 @@ export function isIllustration(character: string): boolean {
 export const MIN_PLAYERS = 4;
 export const MAX_PLAYERS = 10;
 export const SETS_TO_WIN = 5;
-export const PENDING_BOT_ASK_MS = 3500; // Increased from 2500ms for slower, more thoughtful bots
-export const BOT_THINK_MS = 1200; // Increased from 700ms for more deliberate decision-making
+export const PENDING_BOT_ASK_MS = 7000;
+export const BOT_THINK_MS = 2400;

@@ -254,10 +254,17 @@ export function applyAsk(
 
   const success = targetHand.includes(card);
 
+  // The asker does NOT hold this card — they asked for it. Recording this
+  // enables elimination-based inference: once every other player is absent,
+  // the remaining one must hold it.
+  recordFailure(ck, card, askerId);
+
   if (success) {
     hands.set(toPlayerId, targetHand.filter((c) => c !== card));
     askerHand.push(card);
-    recordSuccess(ck, card, askerId);
+    // Target no longer holds the card; asker now does.
+    recordFailure(ck, card, toPlayerId);
+    recordSuccess(ck, card, askerId); // sets holder = asker, clears asker from absent
     pushAction(state, `${asker.name} asked ${target.name} for ${cardLabel(card)} — got it.`);
     state.turnId = askerId;
   } else {

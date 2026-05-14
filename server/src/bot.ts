@@ -206,13 +206,30 @@ export function decideBotAction(
 
   const ctx = buildContext(state, hands, ck, txLog, bot);
 
-  // 1. Declare immediately when the team certainly holds all 6 cards of a set.
-  //    Bots only declare on certainty — never on a hopeful guess.
+  // 1a. Declare when teamCards (derived from successful asks) confirms all 6.
   for (const s of SET_DEFS) {
     if (ctx.claimed.has(s.key)) continue;
     if (s.cards.every(c => ctx.teamCards.has(c))) {
       return { type: "declare", setKey: s.key };
     }
+  }
+
+  // 1b. Inferred declare: a set where every card is either in teamCards/myHand
+  //     OR has P = 0 for all opponents (eliminated to teammates via ck.absent).
+  //     teamCards only tracks cards from *successful* asks; ck.absent can prove
+  //     a card is on our team without a successful ask ever happening.
+  //     Without this check the bot can deadlock: it knows all cards are on its
+  //     team but can't declare because teamCards is incomplete.
+  for (const s of SET_DEFS) {
+    if (ctx.claimed.has(s.key)) continue;
+    // Team must hold at least one card in the set to be allowed to declare.
+    if (!s.cards.some(c => ctx.myHand.includes(c) || ctx.teamCards.has(c))) continue;
+    const allOnTeam = s.cards.every(c => {
+      if (ctx.myHand.includes(c) || ctx.teamCards.has(c)) return true;
+      const cardOdds = computeCardOdds(c, ctx);
+      return ctx.opponents.every(o => (cardOdds.get(o.id) ?? 0) < 0.001);
+    });
+    if (allOnTeam) return { type: "declare", setKey: s.key };
   }
 
   if (ctx.opponents.length === 0) return { type: "pass" };

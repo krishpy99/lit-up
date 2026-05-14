@@ -28,6 +28,7 @@ import {
   applyPass,
   assignTeams,
   ensureValidTurn,
+  findNextPlayerWithCards,
   getHand,
   newKnowledge,
   pushAction,
@@ -553,8 +554,20 @@ export class LiteratureRoom extends Room<GameState> {
       return;
     }
 
-    // Pass (empty-handed) — advance turn without requiring postDeclareId.
-    ensureValidTurn(this.state, this.hands);
+    // Pass — bot has no valid ask (or is empty-handed).
+    if ((this.hands.get(bot.id) ?? []).length > 0) {
+      // Bot still has cards but buildCandidates was empty (e.g. all remaining
+      // cards in its sets are inferred on teammates and the inferred-declare
+      // check above was inconclusive). Force-advance to avoid an infinite
+      // retry loop where ensureValidTurn refuses to move the turn away.
+      const next = findNextPlayerWithCards(this.state, this.hands, bot.id);
+      if (next) {
+        pushAction(this.state, `${bot.name} has no valid ask — turn passes.`);
+        this.state.turnId = next;
+      }
+    } else {
+      ensureValidTurn(this.state, this.hands);
+    }
     this.scheduleBot();
   }
 }

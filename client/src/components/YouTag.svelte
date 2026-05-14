@@ -21,12 +21,21 @@
     isEmpty: boolean;
     canDeclare: boolean;
     onDeclare: () => void;
+    onPassTo: (id: string) => void;
   }
 
-  let { you, room, isYourTurn, isEmpty, canDeclare, onDeclare }: Props = $props();
+  let { you, room, isYourTurn, isEmpty, canDeclare, onDeclare, onPassTo }: Props = $props();
 
   let isPendingTarget = $derived(
     room.pendingBotAsk?.targetId === you.id && !!room.pendingBotAsk?.askerId,
+  );
+
+  let canPass = $derived(isYourTurn && room.postDeclareId === you.id);
+
+  let passableTeammates = $derived(
+    canPass
+      ? room.players.filter((p) => p.id !== you.id && p.team === you.team && p.cardCount > 0)
+      : [],
   );
 </script>
 
@@ -42,7 +51,14 @@
   <Avatar name={you.name} avatar={you.avatar} character={you.character} team={you.team} size={32} />
   <span class="you-name">{you.name}</span>
 
-  {#if canDeclare}
+  {#if canPass && passableTeammates.length > 0}
+    <span class="you-pass-label">Pass to:</span>
+    {#each passableTeammates as tm (tm.id)}
+      <button type="button" class="you-pass-btn" onclick={() => onPassTo(tm.id)}>
+        {tm.name}
+      </button>
+    {/each}
+  {:else if canDeclare}
     <button type="button" class="you-declare-btn" onclick={onDeclare}>
       Declare
     </button>
@@ -117,6 +133,31 @@
     font-size: 0.78rem;
     color: var(--muted);
     font-style: italic;
+  }
+
+  .you-pass-label {
+    font-size: 0.78rem;
+    color: var(--accent);
+    font-weight: 700;
+    letter-spacing: 0.03em;
+  }
+  .you-pass-btn {
+    padding: 5px 14px;
+    border-radius: 8px;
+    background: rgba(52, 211, 153, 0.18);
+    border: 1.5px solid var(--accent);
+    color: var(--accent);
+    font-weight: 800;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: transform 0.15s var(--ease-out), background 0.15s var(--ease-out), box-shadow 0.18s var(--ease-out);
+  }
+  .you-pass-btn:hover {
+    background: rgba(52, 211, 153, 0.38);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px rgba(52, 211, 153, 0.35);
   }
 
   @media (max-width: 760px) {

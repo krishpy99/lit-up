@@ -167,6 +167,42 @@
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
+/* ── Ask bubble (floats from asker → target seat) ────── */
+.ask-bubble {
+  position: fixed;
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 36% 36%, rgba(255,255,255,0.18), rgba(255,255,255,0.04));
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.55),
+    inset 0 2px 8px rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(6px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+.ask-bubble.red  { border-color: rgba(248, 113, 113, 0.55); box-shadow: 0 8px 32px rgba(0,0,0,0.55), 0 0 16px rgba(248,113,113,0.25), inset 0 2px 8px rgba(255,255,255,0.1); }
+.ask-bubble.black { border-color: rgba(255, 255, 255, 0.38); }
+.ask-bubble .abr {
+  font-size: 1.55rem;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--card-black);
+}
+.ask-bubble.red .abr { color: var(--card-red); }
+.ask-bubble .abs {
+  font-size: 1.35rem;
+  line-height: 1;
+  color: var(--card-black);
+}
+.ask-bubble.red .abs { color: var(--card-red); }
+
 /* The hand is now an absolutely-positioned fan inside the arena —
    styles live in Hand.svelte. The legacy `.hand-strip` rule has been
    removed; nothing else references it. */

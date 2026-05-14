@@ -1,10 +1,8 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import type { PlayerSnapshot, RoomSnapshot } from "../lib/client.svelte";
-  import { type Card } from "@lit-up/shared";
   import Seat from "./Seat.svelte";
   import Scoreboard from "./Scoreboard.svelte";
-  import PlayingCard from "./PlayingCard.svelte";
 
   interface Props {
     room: RoomSnapshot;
@@ -63,19 +61,6 @@
   <div class="felt">
     <div class="felt-center">
       <Scoreboard {room} />
-      {#if room.lastAsk && room.status === 'playing'}
-        {@const la = room.lastAsk}
-        {@const asker = room.players.find(p => p.id === la.askerId)}
-        {@const target = room.players.find(p => p.id === la.targetId)}
-        <div class="ask-display">
-          <div class="ask-card-wrap {la.success ? 'success' : 'fail'}">
-            <PlayingCard card={la.card as Card} />
-          </div>
-          <div class="ask-label {la.success ? 'success' : 'fail'}">
-            {asker?.name ?? '?'} → {target?.name ?? '?'}
-          </div>
-        </div>
-      {/if}
     </div>
   </div>
 

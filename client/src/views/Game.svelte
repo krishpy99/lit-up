@@ -10,7 +10,7 @@
   import { game } from "../lib/client.svelte";
   import type { LastAskSnapshot, LastDeclareSnapshot, PlayerSnapshot } from "../lib/client.svelte";
   import { sound } from "../lib/sounds.svelte";
-  import { flyCard, shake } from "../lib/animations";
+  import { flyCard, animateAskBubble } from "../lib/animations";
   import Hand from "../components/Hand.svelte";
   import Table from "../components/Table.svelte";
   import YouTag from "../components/YouTag.svelte";
@@ -183,29 +183,12 @@
     const targetSeat = document.getElementById(`seat-${ask.targetId}`);
     if (!askerSeat || !targetSeat) return;
 
-    if (ask.success) {
-      const youAsked = ask.askerId === game.playerId;
-      const fromEl = targetSeat;
-      const toEl = youAsked
-        ? document.querySelector<HTMLElement>(".hand-grid") ?? askerSeat
-        : askerSeat;
-      flyCard({ from: fromEl, to: toEl, card: ask.card as Card });
-    } else {
-      // Show clear "no card" feedback
-      shake(askerSeat);
-      if (ask.targetId === game.playerId) {
-        const handGrid = document.querySelector<HTMLElement>(".hand-grid");
-        if (handGrid) shake(handGrid);
-        // Toast when you're asked for a card you don't have
-        game.toast(`You don't have ${cardLabel(ask.card as Card)}.`, "info", 2000);
-      } else {
-        // Toast when opponent doesn't have the card you asked for
-        const target = room?.players.find(p => p.id === ask.targetId);
-        if (target) {
-          game.toast(`${target.name} doesn't have ${cardLabel(ask.card as Card)}.`, "info", 2000);
-        }
-      }
-    }
+    animateAskBubble({
+      askerEl: askerSeat,
+      targetEl: targetSeat,
+      card: ask.card as Card,
+      success: ask.success,
+    });
   }
 </script>
 
@@ -231,6 +214,7 @@
           isEmpty={game.hand.length === 0}
           canDeclare={room.turnId === game.playerId && yourHasDeclarableSet}
           {onDeclare}
+          onPassTo={(id) => game.pass(id)}
         />
       {/if}
       <Hand hand={game.hand} {newlyAddedCards} />

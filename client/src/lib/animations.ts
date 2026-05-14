@@ -2,16 +2,15 @@
  * Card animations — ask bubble and declare card-flight.
  *
  * Ask flow:
- *   animateAskBubble — a glassy bubble carrying the card face floats from the
- *   asker's seat to the target's seat over 5 s. On arrival:
- *     success  → bubble dissolves, card face flies back to asker over 5 s
- *     failure  → bubble bursts with a pop at the target's seat
+ *   animateAskBubble — a glassy bubble carrying the card face travels from the
+ *   asker's seat to the target's seat over 5 s using a CSS left/top transition
+ *   (straight line, predictable, no Motion quirks). On arrival:
+ *     success  → bubble dissolves, card face travels back to asker over 5 s
+ *     failure  → bubble bursts (scale + fade)
  *
  * Declare flow:
  *   flyCard — each of the six set cards flies from its holder's seat into
- *   the felt center on a staggered schedule (unchanged).
- *
- * Uses Motion (https://motion.dev) for all keyframe animations.
+ *   the felt center on a staggered schedule (uses Motion).
  */
 
 import { animate } from "motion";
@@ -32,11 +31,17 @@ function rectOf(t: HTMLElement | DOMRect): DOMRect {
   return t instanceof DOMRect ? t : t.getBoundingClientRect();
 }
 
+/** Double requestAnimationFrame — ensures browser has committed styles before transition fires. */
+function rAF2(fn: () => void): void {
+  requestAnimationFrame(() => requestAnimationFrame(fn));
+}
+
 // ── Ask bubble ──────────────────────────────────────────────────────────────
 
 /**
- * Animate an ask: a glassy bubble floats from askerEl → targetEl (5 s), then
- * either bursts (failure) or dissolves while the card flies back (success, 5 s).
+ * Animate an ask: a glassy bubble travels from askerEl → targetEl (5 s), then
+ * either bursts (failure) or dissolves while the card travels back (success, 5 s).
+ * Uses CSS left/top transitions so the movement is always visible and predictable.
  */
 export function animateAskBubble(opts: {
   askerEl: HTMLElement;
@@ -49,60 +54,62 @@ export function animateAskBubble(opts: {
   const toRect   = opts.targetEl.getBoundingClientRect();
   const { rank, symbol, red } = cardShort(opts.card);
 
-  const SIZE = 88; // bubble diameter px
+  const SIZE = 88;
   const fromX = fromRect.left + fromRect.width  / 2 - SIZE / 2;
   const fromY = fromRect.top  + fromRect.height / 2 - SIZE / 2;
   const toX   = toRect.left   + toRect.width    / 2 - SIZE / 2;
   const toY   = toRect.top    + toRect.height   / 2 - SIZE / 2;
 
-  // ── Build bubble element ──────────────────────────────────────────────────
   const bubble = document.createElement("div");
   bubble.className = `ask-bubble ${red ? "red" : "black"}`;
   bubble.innerHTML = `<span class="abr">${rank}</span><span class="abs">${symbol}</span>`;
-  Object.assign(bubble.style, {
-    position: "fixed",
-    left: "0",
-    top: "0",
-    width:  `${SIZE}px`,
-    height: `${SIZE}px`,
-    transform: `translate(${fromX}px, ${fromY}px)`,
-    opacity: "0",
-    pointerEvents: "none",
-    zIndex: "9995",
-  });
+
+  // Start at asker position, invisible. transition is opacity-only for the fade-in phase.
+  bubble.style.cssText = `
+    position: fixed;
+    left: ${fromX}px;
+    top: ${fromY}px;
+    width: ${SIZE}px;
+    height: ${SIZE}px;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 9995;
+    transition: opacity 0.35s ease;
+  `;
   layer.appendChild(bubble);
 
-  // Phase 1: pop in at asker (0.4 s)
-  Promise.resolve(
-    animate(bubble, { opacity: [0, 1], scale: [0.35, 1.12, 1] }, { duration: 0.4, ease: "backOut" }),
-  ).then(() => {
-    // Phase 2: float to target (5 s)
-    Promise.resolve(
-      animate(
-        bubble,
-        { x: [fromX, toX], y: [fromY, toY], scale: [1, 1.07, 1] },
-        { duration: 5, ease: [0.37, 0, 0.63, 1] },
-      ),
-    ).then(() => {
-      if (!opts.success) {
-        // ── Burst ─────────────────────────────────────────────────────────
-        Promise.resolve(
-          animate(
-            bubble,
-            { scale: [1, 1.9, 0.1], opacity: [1, 0.75, 0] },
-            { duration: 0.5, ease: "easeOut" },
-          ),
-        ).then(() => bubble.remove());
-      } else {
-        // ── Dissolve bubble, then fly card back ────────────────────────────
-        animate(bubble, { opacity: [1, 0], scale: [1, 0.55] }, { duration: 0.35, ease: "easeIn" })
-          .then(() => bubble.remove());
+  // Phase 1: fade in (0.35 s)
+  rAF2(() => { bubble.style.opacity = "1"; });
 
-        // Small pause so the dissolve registers before the card appears.
-        setTimeout(() => spawnReturnCard(layer, fromRect, toRect, rank, symbol, red), 220);
-      }
+  // Phase 2: travel to target (5 s straight line), starts after fade-in settles
+  setTimeout(() => {
+    bubble.style.transition = "left 5s linear, top 5s linear";
+    rAF2(() => {
+      bubble.style.left = `${toX}px`;
+      bubble.style.top  = `${toY}px`;
     });
-  });
+
+    // Phase 3: arrival — burst or dissolve + return card
+    setTimeout(() => {
+      if (!opts.success) {
+        // Burst: scale up and fade out
+        bubble.style.transition = "transform 0.45s ease-out, opacity 0.45s ease-out";
+        rAF2(() => {
+          bubble.style.transform = "scale(2.2)";
+          bubble.style.opacity   = "0";
+        });
+        setTimeout(() => bubble.remove(), 500);
+      } else {
+        // Dissolve
+        bubble.style.transition = "opacity 0.3s ease-in";
+        rAF2(() => { bubble.style.opacity = "0"; });
+        setTimeout(() => {
+          bubble.remove();
+          spawnReturnCard(layer, fromRect, toRect, rank, symbol, red);
+        }, 350);
+      }
+    }, 5000);
+  }, 400);
 }
 
 function spawnReturnCard(
@@ -114,7 +121,6 @@ function spawnReturnCard(
   red: boolean,
 ): void {
   const CW = 84, CH = 120;
-  // Card starts centered at target's seat, flies back to asker's seat.
   const cFromX = targetRect.left + targetRect.width  / 2 - CW / 2;
   const cFromY = targetRect.top  + targetRect.height / 2 - CH / 2;
   const cToX   = askerRect.left  + askerRect.width   / 2 - CW / 2;
@@ -126,34 +132,37 @@ function spawnReturnCard(
     `<span class="cr tl">${rank}</span><span class="cs tl">${symbol}</span>` +
     `<span class="cc">${symbol}</span>` +
     `<span class="cr br">${rank}</span><span class="cs br">${symbol}</span>`;
-  Object.assign(card.style, {
-    position: "fixed",
-    left: "0",
-    top: "0",
-    transform: `translate(${cFromX}px, ${cFromY}px) scale(0.7)`,
-    opacity: "0",
-    pointerEvents: "none",
-    zIndex: "9996",
-  });
+
+  // Start at target seat, invisible
+  card.style.cssText = `
+    position: fixed;
+    left: ${cFromX}px;
+    top: ${cFromY}px;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 9996;
+    transition: opacity 0.35s ease;
+  `;
   layer.appendChild(card);
 
-  // Pop card in at target seat
-  Promise.resolve(
-    animate(card, { opacity: [0, 1], scale: [0.7, 1.15] }, { duration: 0.35, ease: "backOut" }),
-  ).then(() => {
-    // Fly back to asker (5 s)
-    Promise.resolve(
-      animate(
-        card,
-        { x: [cFromX, cToX], y: [cFromY, cToY], scale: [1.15, 0.95], rotate: [0, -9] },
-        { duration: 5, ease: [0.37, 0, 0.63, 1] },
-      ),
-    ).then(() => {
-      Promise.resolve(
-        animate(card, { opacity: [1, 0], scale: [0.95, 0.8] }, { duration: 0.35, ease: "easeIn" }),
-      ).then(() => card.remove());
+  // Fade in at target seat
+  rAF2(() => { card.style.opacity = "1"; });
+
+  // Travel back to asker (5 s straight line)
+  setTimeout(() => {
+    card.style.transition = "left 5s linear, top 5s linear";
+    rAF2(() => {
+      card.style.left = `${cToX}px`;
+      card.style.top  = `${cToY}px`;
     });
-  });
+
+    // Fade out on arrival
+    setTimeout(() => {
+      card.style.transition = "opacity 0.35s ease-in";
+      rAF2(() => { card.style.opacity = "0"; });
+      setTimeout(() => card.remove(), 400);
+    }, 5000);
+  }, 400);
 }
 
 // ── Declare card-flight (unchanged) ────────────────────────────────────────

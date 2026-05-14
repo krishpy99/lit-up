@@ -76,8 +76,11 @@
     untrack(() => {
       prevAskAt = ask.at;
       animateAsk(ask);
-      announceAsk(ask);
-      sound.play(ask.success ? "success" : "fail");
+      // Delay reveal until cloud arrives (3 s) to preserve suspense.
+      setTimeout(() => {
+        announceAsk(ask);
+        sound.play(ask.success ? "success" : "fail");
+      }, 3000);
     });
   });
 

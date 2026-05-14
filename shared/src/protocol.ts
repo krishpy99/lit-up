@@ -136,5 +136,5 @@ export function isIllustration(character: string): boolean {
 export const MIN_PLAYERS = 4;
 export const MAX_PLAYERS = 10;
 export const SETS_TO_WIN = 5;
-export const PENDING_BOT_ASK_MS = 7000;
-export const BOT_THINK_MS = 2400;
+export const PENDING_BOT_ASK_MS = 0; // no longer used — ask fires immediately after think
+export const BOT_THINK_MS = 1000;  // 1 s silent think before executing

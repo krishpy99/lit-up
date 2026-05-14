@@ -167,37 +167,66 @@
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
-/* ── Ask bubble (floats from asker → target seat) ────── */
+/* ── Ask cloud (floats from asker → target seat) ─────── */
+/*
+ * Cloud shape: wide pill body (100×54) with two rounded bumps above via
+ * ::before (left, larger) and ::after (right, smaller). All three pieces
+ * share the same glassy background so they read as one unified shape.
+ */
 .ask-bubble {
   position: fixed;
-  width: 88px;
-  height: 88px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 36% 36%, rgba(255,255,255,0.18), rgba(255,255,255,0.04));
-  border: 2px solid rgba(255, 255, 255, 0.35);
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.55),
-    inset 0 2px 8px rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(6px);
+  width: 100px;
+  height: 54px;
+  border-radius: 27px;
+  background: rgba(240, 248, 255, 0.18);
+  backdrop-filter: blur(8px);
+  border: 2px solid rgba(255, 255, 255, 0.42);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255,255,255,0.08);
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1px;
+  gap: 3px;
   pointer-events: none;
-  will-change: transform, opacity;
+  overflow: visible;
 }
-.ask-bubble.red  { border-color: rgba(248, 113, 113, 0.55); box-shadow: 0 8px 32px rgba(0,0,0,0.55), 0 0 16px rgba(248,113,113,0.25), inset 0 2px 8px rgba(255,255,255,0.1); }
-.ask-bubble.black { border-color: rgba(255, 255, 255, 0.38); }
+.ask-bubble::before,
+.ask-bubble::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(240, 248, 255, 0.18);
+  backdrop-filter: blur(8px);
+  border: 2px solid rgba(255, 255, 255, 0.42);
+}
+.ask-bubble::before {
+  width: 46px;
+  height: 46px;
+  top: -22px;
+  left: 13px;
+}
+.ask-bubble::after {
+  width: 32px;
+  height: 32px;
+  top: -14px;
+  right: 14px;
+}
+
+.ask-bubble.red {
+  border-color: rgba(248, 113, 113, 0.55);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.55), 0 0 14px rgba(248,113,113,0.22);
+}
+.ask-bubble.red::before,
+.ask-bubble.red::after { border-color: rgba(248, 113, 113, 0.55); }
+
 .ask-bubble .abr {
-  font-size: 1.55rem;
+  font-size: 1.45rem;
   font-weight: 900;
   line-height: 1;
   color: var(--card-black);
 }
 .ask-bubble.red .abr { color: var(--card-red); }
 .ask-bubble .abs {
-  font-size: 1.35rem;
+  font-size: 1.25rem;
   line-height: 1;
   color: var(--card-black);
 }

@@ -13,7 +13,6 @@ import {
   BOT_THINK_MS,
   MAX_PLAYERS,
   MIN_PLAYERS,
-  PENDING_BOT_ASK_MS,
   type AskCommand,
   type DeclareCommand,
   type JoinOptions,
@@ -334,10 +333,6 @@ export class LiteratureRoom extends Room<GameState> {
   private handleAsk(client: Client, msg: AskCommand): void {
     const player = this.clientPlayer(client);
     if (!player) return;
-    if (this.state.pendingBotAsk.askerId) {
-      this.dispatchError(client, "Wait for the bot's ask to resolve.");
-      return;
-    }
     const err = applyAsk(this.state, this.hands, this.knowledge, this.transactions, player.id, msg.toPlayerId, msg.card);
     if (err) {
       this.dispatchError(client, err);
@@ -503,33 +498,32 @@ export class LiteratureRoom extends Room<GameState> {
     const action = decideBotAction(this.state, this.hands, this.knowledge, this.transactions, bot);
 
     if (action.type === "ask") {
-      // Two-phase: show pending ask for visibility, then resolve.
-      this.state.pendingBotAsk.assign({
-        askerId: bot.id,
-        targetId: action.targetId,
-        card: action.card,
-      });
+      // Capture certainty BEFORE ask mutates knowledge (for proof logging).
+      const certainHolder = this.knowledge.get(action.card)?.holder;
 
-      this.botTimer = setTimeout(() => {
-        this.state.pendingBotAsk.assign({ askerId: "", targetId: "", card: "" });
-        if (this.state.status !== "playing" || this.state.turnId !== bot.id) return;
-        const err = applyAsk(
-          this.state,
-          this.hands,
-          this.knowledge,
-          this.transactions,
-          bot.id,
-          action.targetId,
-          action.card,
-        );
-        if (err) {
-          pushAction(this.state, err);
-          ensureValidTurn(this.state, this.hands);
-        } else {
-          this.pushHandTo(action.targetId);
+      const err = applyAsk(
+        this.state,
+        this.hands,
+        this.knowledge,
+        this.transactions,
+        bot.id,
+        action.targetId,
+        action.card,
+      );
+      if (err) {
+        pushAction(this.state, err);
+        ensureValidTurn(this.state, this.hands);
+      } else {
+        // Proof that the knowledge tracker is working: when ck.holder had
+        // already confirmed the target was holding this card, log it so
+        // players can see the bot's inference in the action log.
+        if (certainHolder === action.targetId) {
+          const target = this.state.players.get(action.targetId);
+          pushAction(this.state, `🧠 ${bot.name} tracked: knew ${target?.name ?? "?"} had that card`);
         }
-        this.scheduleBot();
-      }, PENDING_BOT_ASK_MS);
+        this.pushHandTo(action.targetId);
+      }
+      this.scheduleBot();
       return;
     }
 

@@ -54,11 +54,12 @@ export function animateAskBubble(opts: {
   const toRect   = opts.targetEl.getBoundingClientRect();
   const { rank, symbol, red } = cardShort(opts.card);
 
-  const SIZE = 88;
-  const fromX = fromRect.left + fromRect.width  / 2 - SIZE / 2;
-  const fromY = fromRect.top  + fromRect.height / 2 - SIZE / 2;
-  const toX   = toRect.left   + toRect.width    / 2 - SIZE / 2;
-  const toY   = toRect.top    + toRect.height   / 2 - SIZE / 2;
+  // Cloud element dimensions (body only; CSS bumps extend above via ::before/::after).
+  const W = 100, H = 54;
+  const fromX = fromRect.left + fromRect.width  / 2 - W / 2;
+  const fromY = fromRect.top  + fromRect.height / 2 - H / 2;
+  const toX   = toRect.left   + toRect.width    / 2 - W / 2;
+  const toY   = toRect.top    + toRect.height   / 2 - H / 2;
 
   const bubble = document.createElement("div");
   bubble.className = `ask-bubble ${red ? "red" : "black"}`;
@@ -69,8 +70,6 @@ export function animateAskBubble(opts: {
     position: fixed;
     left: ${fromX}px;
     top: ${fromY}px;
-    width: ${SIZE}px;
-    height: ${SIZE}px;
     opacity: 0;
     pointer-events: none;
     z-index: 9995;
@@ -81,9 +80,9 @@ export function animateAskBubble(opts: {
   // Phase 1: fade in (0.35 s)
   rAF2(() => { bubble.style.opacity = "1"; });
 
-  // Phase 2: travel to target (5 s straight line), starts after fade-in settles
+  // Phase 2: travel to target (3 s straight line), starts after fade-in settles
   setTimeout(() => {
-    bubble.style.transition = "left 5s linear, top 5s linear";
+    bubble.style.transition = "left 3s linear, top 3s linear";
     rAF2(() => {
       bubble.style.left = `${toX}px`;
       bubble.style.top  = `${toY}px`;
@@ -92,13 +91,13 @@ export function animateAskBubble(opts: {
     // Phase 3: arrival — burst or dissolve + return card
     setTimeout(() => {
       if (!opts.success) {
-        // Burst: scale up and fade out
-        bubble.style.transition = "transform 0.45s ease-out, opacity 0.45s ease-out";
+        // Burst: scale up and fade out (0.5 s)
+        bubble.style.transition = "transform 0.5s ease-out, opacity 0.5s ease-out";
         rAF2(() => {
           bubble.style.transform = "scale(2.2)";
           bubble.style.opacity   = "0";
         });
-        setTimeout(() => bubble.remove(), 500);
+        setTimeout(() => bubble.remove(), 550);
       } else {
         // Dissolve
         bubble.style.transition = "opacity 0.3s ease-in";
@@ -108,7 +107,7 @@ export function animateAskBubble(opts: {
           spawnReturnCard(layer, fromRect, toRect, rank, symbol, red);
         }, 350);
       }
-    }, 5000);
+    }, 3000);
   }, 400);
 }
 
@@ -148,9 +147,9 @@ function spawnReturnCard(
   // Fade in at target seat
   rAF2(() => { card.style.opacity = "1"; });
 
-  // Travel back to asker (5 s straight line)
+  // Travel back to asker (4 s straight line)
   setTimeout(() => {
-    card.style.transition = "left 5s linear, top 5s linear";
+    card.style.transition = "left 4s linear, top 4s linear";
     rAF2(() => {
       card.style.left = `${cToX}px`;
       card.style.top  = `${cToY}px`;
@@ -161,7 +160,7 @@ function spawnReturnCard(
       card.style.transition = "opacity 0.35s ease-in";
       rAF2(() => { card.style.opacity = "0"; });
       setTimeout(() => card.remove(), 400);
-    }, 5000);
+    }, 4000);
   }, 400);
 }
 

@@ -381,9 +381,19 @@ export function applyDeclare(
   }
 
   if (allCorrect) {
-    // Successful declare: keep turn on declarer so they can choose who goes next.
     state.postDeclareId = declarerId;
-    // Don't call ensureValidTurn — declarer holds the turn to pass or continue.
+    // If the declarer has no cards left after the set was stripped, auto-pass
+    // to a teammate with cards (or the next player with cards if no teammate).
+    if ((hands.get(declarerId) ?? []).length === 0) {
+      const teammate = findNextPlayerWithCards(state, hands, declarerId, declarer.team as Team);
+      if (teammate) {
+        state.postDeclareId = "";
+        state.turnId = teammate;
+      } else {
+        state.postDeclareId = "";
+        ensureValidTurn(state, hands);
+      }
+    }
   } else {
     // Failed declare: turn advances normally.
     state.postDeclareId = "";

@@ -101,6 +101,15 @@ export type QueuedEventKind = "ask" | "declare" | "none";
 export interface QueuedEvent {
   kind: QueuedEventKind;
   snapshot: RoomSnapshot;
+  /**
+   * The local player's hand at the time this event was enqueued, captured from
+   * pendingHand at enqueue time. Applied to `game.hand` at the appropriate
+   * commit point for each event kind:
+   *   - "ask" success: at commitAskArrival (bubble arrives at target)
+   *   - "ask" failure / "declare" / "none": at consumeEvent
+   * Null if no "hand" message arrived before this state change.
+   */
+  pendingHand: Card[] | null;
 }
 
 /**
@@ -184,12 +193,20 @@ class GameClient {
   visibleRoom$ = $state<RoomSnapshot | null>(null);
   hand = $state<Card[]>([]);
   /**
-   * Staging area for hand updates that arrive via the "hand" message while an
-   * animation is in progress. Applied to `hand` at the same moment
-   * visibleRoom$ advances (in consumeEvent / fast-path) so the hand fan and
-   * card counts never update before the animation completes.
+   * Staging area for hand updates that arrive via the "hand" message before
+   * the accompanying state-change has been received. Captured into the queued
+   * event at enqueue time (or flushed immediately on the fast-path for "none"
+   * events). After enqueue, this is reset to null so it doesn't bleed into a
+   * subsequent event's capture.
    */
   private pendingHand: Card[] | null = null;
+
+  /**
+   * True once commitAskArrival has already flushed the head event's hand.
+   * Used by consumeEvent to skip the hand flush (avoiding a double-apply).
+   * Reset to false whenever the head event changes.
+   */
+  private headHandApplied = false;
 
   // Toast queue
   toasts = $state<Toast[]>([]);
@@ -211,31 +228,36 @@ class GameClient {
   /**
    * Called by Game.svelte after it has fully awaited the animation for the
    * head of the queue. Promotes the snapshot to visibleRoom$ and removes the
-   * event from the queue. Also flushes any pending hand update so the hand fan
-   * and card counts advance at the same moment.
+   * event from the queue.
+   *
+   * For "ask" success events the hand was already flushed by commitAskArrival
+   * when the bubble arrived (headHandApplied = true). For all other events the
+   * hand is flushed here so the hand fan and card counts advance together.
    */
   consumeEvent(): void {
     const head = this.eventQueue[0];
     if (!head) return;
-    // Flush staged hand before advancing visible state so both update together.
-    if (this.pendingHand !== null) {
-      this.hand = this.pendingHand;
-      this.pendingHand = null;
+    // Flush this event's captured hand if commitAskArrival hasn't done it yet.
+    if (!this.headHandApplied && head.pendingHand !== null) {
+      this.hand = head.pendingHand;
     }
+    this.headHandApplied = false; // reset for the next head
     this.visibleRoom$ = head.snapshot;
     this.eventQueue = this.eventQueue.slice(1);
     this.queueBusy = this.eventQueue.length > 0;
   }
 
   /**
-   * Mid-animation commit: reveals only the target's card count decrease when
-   * the ask bubble arrives. The asker's card count is held at its pre-ask
-   * value so it doesn't jump before the return card lands.
+   * Mid-animation commit for a SUCCESSFUL ask when the bubble arrives at the
+   * target. Reveals the target's card count decrease and flushes the pending
+   * hand (so the local player's hand fan loses the card at the correct visual
+   * moment). The asker's card count is held at its pre-ask value so it doesn't
+   * jump before the return card lands.
    *
-   * Does NOT advance the event queue or flush pendingHand — consumeEvent()
-   * handles those at the end of the full animation.
+   * Does NOT advance the event queue — consumeEvent() handles that when the
+   * return card finishes traveling.
    *
-   * @param askerId      Player whose count should be held at the old value.
+   * @param askerId        Player whose count should be held at the old value.
    * @param askerOldCount  The asker's card count before the ask resolved.
    */
   commitAskArrival(askerId: string, askerOldCount: number): void {
@@ -249,8 +271,13 @@ class GameClient {
       ),
     };
     this.visibleRoom$ = intermediate;
-    // pendingHand and the queue entry are intentionally NOT touched here;
-    // consumeEvent() will flush them when the full animation completes.
+
+    // Flush the pending hand NOW — bubble arrived = card visually left the target.
+    // Set headHandApplied so consumeEvent() knows to skip the hand flush.
+    if (head.pendingHand !== null) {
+      this.hand = head.pendingHand;
+      this.headHandApplied = true;
+    }
   }
 
   // Sidebar is now the primary UI (no toggle needed)
@@ -368,6 +395,7 @@ class GameClient {
     this.queueBusy = false;
     this.hand = [];
     this.pendingHand = null;
+    this.headHandApplied = false;
     this.playerId = "";
     this.roomCode = "";
     this.status = "idle";
@@ -468,8 +496,12 @@ class GameClient {
         }
         this.visibleRoom$ = next;
       } else {
-        // Queue the event; Game.svelte will drain it.
-        this.eventQueue = [...this.eventQueue, { kind, snapshot: next }];
+        // Capture pendingHand into the event so each event carries exactly the
+        // hand update that belongs to it. This prevents a hand message from one
+        // ask leaking into a later event's consumeEvent() call.
+        const capturedHand = this.pendingHand;
+        this.pendingHand = null;
+        this.eventQueue = [...this.eventQueue, { kind, snapshot: next, pendingHand: capturedHand }];
         this.queueBusy = true;
       }
     });
@@ -506,6 +538,7 @@ class GameClient {
       this.queueBusy = false;
       this.hand = [];
       this.pendingHand = null;
+      this.headHandApplied = false;
       this.status = "idle";
       this.view = "landing";
     });

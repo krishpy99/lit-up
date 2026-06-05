@@ -56,6 +56,15 @@ if (hasClientBuild) {
   });
 }
 
+// Log uncaught exceptions to stderr so they're visible in Render's log viewer
+// before Colyseus's internal handler calls gracefullyShutdown().
+process.on("uncaughtException", (err) => {
+  console.error("[lit-up] uncaughtException:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[lit-up] unhandledRejection:", reason);
+});
+
 const httpServer = http.createServer(app);
 const gameServer = new Server({
   transport: new WebSocketTransport({ server: httpServer }),
@@ -68,4 +77,7 @@ gameServer.listen(PORT).then(() => {
   if (hasClientBuild) {
     console.log(`[lit-up] Serving client from ${clientDist}`);
   }
+}).catch((err: unknown) => {
+  console.error("[lit-up] Failed to start server:", err);
+  process.exit(1);
 });

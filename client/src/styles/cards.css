@@ -167,70 +167,61 @@
   border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
-/* ── Ask cloud (floats from asker → target seat) ─────── */
+/* ── Ask bubble (floats from asker → target seat) ────── */
 /*
- * Cloud shape: wide pill body (100×54) with two rounded bumps above via
- * ::before (left, larger) and ::after (right, smaller). All three pieces
- * share the same glassy background so they read as one unified shape.
+ * Ghost card: same proportions as a real card but translucent/frosted,
+ * so it reads as "a question" rather than a confirmed transaction.
  */
 .ask-bubble {
   position: fixed;
-  width: 100px;
-  height: 54px;
-  border-radius: 27px;
+  width: 84px;
+  height: 120px;
+  border-radius: 9px;
   background: rgba(240, 248, 255, 0.18);
-  backdrop-filter: blur(8px);
-  border: 2px solid rgba(255, 255, 255, 0.42);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255,255,255,0.08);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
+  backdrop-filter: blur(10px);
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.25);
   pointer-events: none;
-  overflow: visible;
-}
-.ask-bubble::before,
-.ask-bubble::after {
-  content: "";
-  position: absolute;
-  border-radius: 50%;
-  background: rgba(240, 248, 255, 0.18);
-  backdrop-filter: blur(8px);
-  border: 2px solid rgba(255, 255, 255, 0.42);
-}
-.ask-bubble::before {
-  width: 46px;
-  height: 46px;
-  top: -22px;
-  left: 13px;
-}
-.ask-bubble::after {
-  width: 32px;
-  height: 32px;
-  top: -14px;
-  right: 14px;
 }
 
 .ask-bubble.red {
-  border-color: rgba(248, 113, 113, 0.55);
-  box-shadow: 0 6px 24px rgba(0,0,0,0.55), 0 0 14px rgba(248,113,113,0.22);
+  border-color: rgba(248, 113, 113, 0.6);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), 0 0 14px rgba(248, 113, 113, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
-.ask-bubble.red::before,
-.ask-bubble.red::after { border-color: rgba(248, 113, 113, 0.55); }
 
+/* Rank and suit — positioned like real .card corners */
 .ask-bubble .abr {
-  font-size: 1.45rem;
-  font-weight: 900;
+  position: absolute;
+  top: 7px;
+  left: 8px;
+  font-size: 1.15rem;
+  font-weight: 800;
   line-height: 1;
   color: var(--card-black);
 }
 .ask-bubble.red .abr { color: var(--card-red); }
+
 .ask-bubble .abs {
-  font-size: 1.25rem;
+  position: absolute;
+  top: 27px;
+  left: 7px;
+  font-size: 1.05rem;
   line-height: 1;
   color: var(--card-black);
 }
 .ask-bubble.red .abs { color: var(--card-red); }
+
+/* Center suit pip */
+.ask-bubble .abc {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 2.1rem;
+  line-height: 1;
+  color: var(--card-black);
+}
+.ask-bubble.red .abc { color: var(--card-red); }
 
 /* The hand is now an absolutely-positioned fan inside the arena —
    styles live in Hand.svelte. The legacy `.hand-strip` rule has been

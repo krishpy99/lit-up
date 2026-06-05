@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fly, fade } from "svelte/transition";
-  import { cardShort } from "@lit-up/shared";
-  import { classifyAction } from "../lib/format";
+  import { cardShort, SUITS, SUIT_SYMBOL, SUIT_COLOR, type Suit, type SetKey } from "@lit-up/shared";
+  import { classifyAction, actionBelongsToSet } from "../lib/format";
   import type { RoomSnapshot } from "../lib/client.svelte";
 
   interface Props {
@@ -16,13 +16,49 @@
   let unread = $state(0);
   let prevTopAction = $state<string | undefined>();
 
+  // Level-1 selection: a suit key, "joker", or null (= All)
+  let selectedSuit = $state<Suit | "joker" | null>(null);
+  // Level-2 selection: "low", "high", or null (= both halves of the suit)
+  let selectedHalf = $state<"low" | "high" | null>(null);
+
+  // Derived active SetKey(s) for filtering
+  let activeSetKeys = $derived.by((): SetKey[] => {
+    if (selectedSuit === null) return [];
+    if (selectedSuit === "joker") return ["eights_jokers"];
+    if (selectedHalf === "low") return [`${SUITS.find(s => s.key === selectedSuit)!.name.toLowerCase()}_low`];
+    if (selectedHalf === "high") return [`${SUITS.find(s => s.key === selectedSuit)!.name.toLowerCase()}_high`];
+    // Suit selected but no half yet — show both halves
+    const name = SUITS.find(s => s.key === selectedSuit)!.name.toLowerCase();
+    return [`${name}_low`, `${name}_high`];
+  });
+
+  function selectSuit(suit: Suit | "joker") {
+    if (selectedSuit === suit) {
+      // Deselect
+      selectedSuit = null;
+      selectedHalf = null;
+    } else {
+      selectedSuit = suit;
+      selectedHalf = null;
+      // Joker has no sub-set, filter applies immediately
+    }
+  }
+
+  function selectHalf(half: "low" | "high") {
+    selectedHalf = selectedHalf === half ? null : half;
+  }
+
   // The host picks how many recent transactions to display in the lobby.
   // 0 = "all" (server-capped at 20). This is locked once the game starts.
-  let actions = $derived(
-    room.defaultLogCount === 0
+  let actions = $derived.by(() => {
+    let list = room.defaultLogCount === 0
       ? room.actions
-      : room.actions.slice(0, room.defaultLogCount),
-  );
+      : room.actions.slice(0, room.defaultLogCount);
+    if (activeSetKeys.length > 0) {
+      list = list.filter((t) => activeSetKeys.some(k => actionBelongsToSet(t, k)));
+    }
+    return list;
+  });
 
   $effect(() => {
     const top = room.actions[0];
@@ -56,6 +92,41 @@
       <span>Action log</span>
       <button class="log-close" onclick={toggle} aria-label="Close log">×</button>
     </header>
+    <div class="log-filter-strip">
+      <!-- Level 1: All + suit chips + Joker -->
+      <button
+        class="log-filter-chip"
+        class:active={selectedSuit === null}
+        onclick={() => { selectedSuit = null; selectedHalf = null; }}
+      >All</button>
+      {#each SUITS as s (s.key)}
+        <button
+          class="log-filter-chip suit-chip"
+          class:active={selectedSuit === s.key}
+          class:red={SUIT_COLOR[s.key] === 'red'}
+          onclick={() => selectSuit(s.key)}
+        >{SUIT_SYMBOL[s.key]}</button>
+      {/each}
+      <button
+        class="log-filter-chip joker-chip"
+        class:active={selectedSuit === 'joker'}
+        onclick={() => selectSuit('joker')}
+      >Jo</button>
+      <!-- Level 2: Minor/Major sub-chips, only when a suit (not joker) is active -->
+      {#if selectedSuit !== null && selectedSuit !== 'joker'}
+        <span class="log-filter-sep">›</span>
+        <button
+          class="log-filter-chip sub-chip"
+          class:active={selectedHalf === 'low'}
+          onclick={() => selectHalf('low')}
+        >Minor</button>
+        <button
+          class="log-filter-chip sub-chip"
+          class:active={selectedHalf === 'high'}
+          onclick={() => selectHalf('high')}
+        >Major</button>
+      {/if}
+    </div>
     <div class="log-list">
       {#if room.pendingBotAsk && pendingAsker && pendingTarget && pendingInfo}
         <div class="log-pending">
@@ -178,6 +249,70 @@
     border-radius: 6px;
   }
   .log-close:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+  .log-filter-strip {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 5px;
+    padding: 7px 14px;
+    border-bottom: 1px solid var(--panel-border);
+    scrollbar-width: none;
+  }
+  .log-filter-strip::-webkit-scrollbar { display: none; }
+  .log-filter-chip {
+    flex-shrink: 0;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--panel-border);
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.14s, border-color 0.14s, color 0.14s;
+    white-space: nowrap;
+  }
+  .log-filter-chip:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text);
+  }
+  .log-filter-chip.active {
+    background: rgba(52, 211, 153, 0.18);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .log-filter-chip.suit-chip {
+    font-size: 0.82rem;
+    padding: 3px 8px;
+  }
+  .log-filter-chip.suit-chip.red {
+    color: #f87171;
+  }
+  .log-filter-chip.suit-chip.red.active {
+    color: #fca5a5;
+    border-color: #f87171;
+    background: rgba(248, 113, 113, 0.18);
+  }
+  .log-filter-chip.joker-chip {
+    font-size: 0.7rem;
+    font-style: italic;
+    padding: 3px 8px;
+  }
+  .log-filter-chip.sub-chip {
+    font-size: 0.65rem;
+    padding: 2px 7px;
+    opacity: 0.85;
+  }
+  .log-filter-sep {
+    display: flex;
+    align-items: center;
+    color: var(--muted);
+    font-size: 0.75rem;
+    padding: 0 1px;
+    flex-shrink: 0;
+    user-select: none;
+  }
+
   .log-list {
     overflow-y: auto;
     padding: 8px 14px 14px;

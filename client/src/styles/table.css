@@ -7,11 +7,6 @@
   flex-direction: column;
   height: calc(100svh - var(--header-h));
   overflow: hidden;
-  transition: margin-right 0.3s var(--ease-spring);
-}
-
-.game-shell.sidebar-open {
-  margin-right: 380px;
 }
 
 /* ── Arena (full width) ──────────────────────────────── */
@@ -85,6 +80,12 @@
   color: var(--muted);
   margin-top: 4px;
 }
+.felt-over-banner .over-actions {
+  margin-top: 14px;
+  pointer-events: auto;
+  display: flex;
+  justify-content: center;
+}
 
 /* ── Seats ───────────────────────────────────────────── */
 .seats {
@@ -156,9 +157,28 @@
   font-size: 0.86rem;
   font-weight: 700;
   white-space: nowrap;
-  max-width: 130px;
+  max-width: 100px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.seat-team-pill {
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.seat-team-pill.team-a {
+  color: var(--team-a-text);
+  background: rgba(241, 245, 249, 0.12);
+  border: 1px solid rgba(241, 245, 249, 0.22);
+}
+.seat-team-pill.team-b {
+  color: var(--team-b-text);
+  background: rgba(148, 163, 184, 0.10);
+  border: 1px solid rgba(148, 163, 184, 0.22);
 }
 .seat-notes-btn {
   font-size: 0.84rem;

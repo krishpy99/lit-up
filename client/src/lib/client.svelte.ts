@@ -19,6 +19,7 @@ import {
   type SetRoomConfigCommand,
   type Team,
 } from "@lit-up/shared";
+// animations import removed — queue drain is now driven by Game.svelte
 
 // ── Snapshot types — plain JS mirrors of the Colyseus schema ──
 
@@ -86,6 +87,45 @@ export interface Toast {
   kind: "info" | "success" | "error" | "warn" | "celebrate";
 }
 
+// ── Animation event queue types ──────────────────────────────
+
+/**
+ * The type of animation that a state transition requires.
+ *
+ * "ask"     — an ask bubble animation (3–7 s)
+ * "declare" — a declare card-flight animation (~1.5 s staggered)
+ * "none"    — no animation; visibleRoom$ can advance immediately
+ */
+export type QueuedEventKind = "ask" | "declare" | "none";
+
+export interface QueuedEvent {
+  kind: QueuedEventKind;
+  snapshot: RoomSnapshot;
+}
+
+/**
+ * Inspect the diff between the previous visible snapshot and the new one
+ * to decide what animation (if any) is required before revealing the new state.
+ */
+function classifyEvent(prev: RoomSnapshot | null, next: RoomSnapshot): QueuedEventKind {
+  // New ask: at timestamp changed and askerId is set
+  if (
+    next.lastAsk?.at &&
+    next.lastAsk.at !== (prev?.lastAsk?.at ?? 0) &&
+    next.lastAsk.askerId
+  ) {
+    return "ask";
+  }
+  // New declare: lastDeclare appeared or its timestamp changed
+  if (
+    next.lastDeclare?.at &&
+    next.lastDeclare.at !== (prev?.lastDeclare?.at ?? 0)
+  ) {
+    return "declare";
+  }
+  return "none";
+}
+
 // ── Server URL discovery ─────────────────────────────────────
 
 function inferServerUrl(): string {
@@ -136,11 +176,82 @@ class GameClient {
 
   // Mirrored room state
   room$ = $state<RoomSnapshot | null>(null);
+  /**
+   * Visible snapshot — frozen during animations so card counts, turn
+   * indicator, and log don't jump mid-flight. Advances to room$ once the
+   * current animation completes (or immediately if nothing is playing).
+   */
+  visibleRoom$ = $state<RoomSnapshot | null>(null);
   hand = $state<Card[]>([]);
+  /**
+   * Staging area for hand updates that arrive via the "hand" message while an
+   * animation is in progress. Applied to `hand` at the same moment
+   * visibleRoom$ advances (in consumeEvent / fast-path) so the hand fan and
+   * card counts never update before the animation completes.
+   */
+  private pendingHand: Card[] | null = null;
 
   // Toast queue
   toasts = $state<Toast[]>([]);
   private toastSeq = 0;
+
+  // ── Animation event queue ────────────────────────────────
+  /**
+   * Pending state snapshots waiting for their animation to complete before
+   * being promoted to visibleRoom$. Game.svelte drains this by awaiting each
+   * animation and then calling consumeEvent().
+   */
+  eventQueue = $state<QueuedEvent[]>([]);
+  /**
+   * True while an event is being animated by Game.svelte. Buttons are
+   * disabled during this period.
+   */
+  queueBusy = $state(false);
+
+  /**
+   * Called by Game.svelte after it has fully awaited the animation for the
+   * head of the queue. Promotes the snapshot to visibleRoom$ and removes the
+   * event from the queue. Also flushes any pending hand update so the hand fan
+   * and card counts advance at the same moment.
+   */
+  consumeEvent(): void {
+    const head = this.eventQueue[0];
+    if (!head) return;
+    // Flush staged hand before advancing visible state so both update together.
+    if (this.pendingHand !== null) {
+      this.hand = this.pendingHand;
+      this.pendingHand = null;
+    }
+    this.visibleRoom$ = head.snapshot;
+    this.eventQueue = this.eventQueue.slice(1);
+    this.queueBusy = this.eventQueue.length > 0;
+  }
+
+  /**
+   * Mid-animation commit: reveals only the target's card count decrease when
+   * the ask bubble arrives. The asker's card count is held at its pre-ask
+   * value so it doesn't jump before the return card lands.
+   *
+   * Does NOT advance the event queue or flush pendingHand — consumeEvent()
+   * handles those at the end of the full animation.
+   *
+   * @param askerId      Player whose count should be held at the old value.
+   * @param askerOldCount  The asker's card count before the ask resolved.
+   */
+  commitAskArrival(askerId: string, askerOldCount: number): void {
+    const head = this.eventQueue[0];
+    if (!head) return;
+    // Build intermediate snapshot: full new state but with asker's OLD count.
+    const intermediate: RoomSnapshot = {
+      ...head.snapshot,
+      players: head.snapshot.players.map((p) =>
+        p.id === askerId ? { ...p, cardCount: askerOldCount } : p,
+      ),
+    };
+    this.visibleRoom$ = intermediate;
+    // pendingHand and the queue entry are intentionally NOT touched here;
+    // consumeEvent() will flush them when the full animation completes.
+  }
 
   // Sidebar is now the primary UI (no toggle needed)
 
@@ -252,7 +363,11 @@ class GameClient {
     this.room?.leave(true);
     this.room = null;
     this.room$ = null;
+    this.visibleRoom$ = null;
+    this.eventQueue = [];
+    this.queueBusy = false;
     this.hand = [];
+    this.pendingHand = null;
     this.playerId = "";
     this.roomCode = "";
     this.status = "idle";
@@ -332,10 +447,31 @@ class GameClient {
     this.room = room;
 
     room.onStateChange((state) => {
-      this.room$ = snapshotRoom(state);
+      const next = snapshotRoom(state);
+      this.room$ = next;
       // Keep view in sync with room status.
       const status = (state as { status: GameStatus }).status;
       this.view = status === "lobby" ? "lobby" : "game";
+
+      // Classify what animation (if any) this transition requires, using the
+      // last snapshot that is currently visible or queued as the "previous" state.
+      const lastQueued = this.eventQueue[this.eventQueue.length - 1];
+      const prev = lastQueued?.snapshot ?? this.visibleRoom$;
+      const kind = classifyEvent(prev, next);
+
+      if (kind === "none" && this.eventQueue.length === 0) {
+        // Fast path: nothing animating, nothing queued — advance immediately.
+        // Also flush any pending hand so card counts and hand fan stay in sync.
+        if (this.pendingHand !== null) {
+          this.hand = this.pendingHand;
+          this.pendingHand = null;
+        }
+        this.visibleRoom$ = next;
+      } else {
+        // Queue the event; Game.svelte will drain it.
+        this.eventQueue = [...this.eventQueue, { kind, snapshot: next }];
+        this.queueBusy = true;
+      }
     });
 
     room.onMessage("welcome", (msg: { playerId: string; roomCode: string }) => {
@@ -346,7 +482,12 @@ class GameClient {
     });
 
     room.onMessage("hand", (msg: { hand: Card[] }) => {
-      this.hand = msg.hand;
+      // Always stage the hand update. The server sends "hand" messages before
+      // broadcasting the schema state change (Colyseus flushes schema patches
+      // at the end of the request cycle, after explicit client.send() calls).
+      // Staging here ensures the hand fan and card counts advance together
+      // when consumeEvent() or the fast-path flush fires — never before.
+      this.pendingHand = msg.hand;
     });
 
     room.onMessage("error", (msg: { message: string }) => {
@@ -360,7 +501,11 @@ class GameClient {
       this.toast("Disconnected from room.", "warn");
       this.room = null;
       this.room$ = null;
+      this.visibleRoom$ = null;
+      this.eventQueue = [];
+      this.queueBusy = false;
       this.hand = [];
+      this.pendingHand = null;
       this.status = "idle";
       this.view = "landing";
     });

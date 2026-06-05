@@ -11,6 +11,7 @@ import {
   AVATAR_COLORS,
   AVATAR_ILLUSTRATIONS,
   BOT_THINK_MS,
+  POST_BOT_ACTION_DELAY_MS,
   MAX_PLAYERS,
   MIN_PLAYERS,
   type AskCommand,
@@ -425,8 +426,25 @@ export class LiteratureRoom extends Room<GameState> {
     this.state.players.forEach((p: Player, id: string) => {
       if (p.isBot) botIds.push(id);
     });
-    botIds.forEach((id) => this.removePlayer(id));
-    if (botIds.length > 0) pushAction(this.state, "Bots removed.");
+    if (botIds.length === 0) return;
+
+    const humanCount = this.state.players.size - botIds.length;
+    let toRemove: number;
+    const total = this.state.players.size;
+    // If removing 2 would bring us below MIN_PLAYERS, remove all bots.
+    if (total - 2 < MIN_PLAYERS || total - 2 < humanCount) {
+      toRemove = botIds.length;
+    } else {
+      // If total is odd, remove 1 bot to make it even.
+      // If total is even, remove 2 bots to keep it even.
+      toRemove = total % 2 === 1 ? 1 : 2;
+      toRemove = Math.min(toRemove, botIds.length);
+    }
+
+    for (let i = 0; i < toRemove; i++) {
+      this.removePlayer(botIds[i]);
+    }
+    pushAction(this.state, toRemove === 1 ? "1 bot removed." : `${toRemove} bots removed.`);
     assignTeams(this.state);
   }
 
@@ -481,13 +499,23 @@ export class LiteratureRoom extends Room<GameState> {
 
   // ── Bot scheduler ────────────────────────────────────────
 
-  private scheduleBot(): void {
+  /**
+   * Schedule the next bot turn.
+   *
+   * @param postAction - When true the server just finished executing a bot
+   *   action and we insert POST_BOT_ACTION_DELAY_MS so the current animation
+   *   can complete on screen before the next action fires. When false (the
+   *   initial trigger from a human action or game-start) we only wait
+   *   BOT_THINK_MS for the bot's "think" pause.
+   */
+  private scheduleBot(postAction = false): void {
     if (this.botTimer) clearTimeout(this.botTimer);
     if (this.state.status !== "playing") return;
     const cur = this.state.players.get(this.state.turnId);
     if (!cur || !cur.isBot) return;
 
-    this.botTimer = setTimeout(() => this.runBotTurn(), BOT_THINK_MS);
+    const delay = postAction ? POST_BOT_ACTION_DELAY_MS : BOT_THINK_MS;
+    this.botTimer = setTimeout(() => this.runBotTurn(), delay);
   }
 
   private runBotTurn(): void {
@@ -523,7 +551,7 @@ export class LiteratureRoom extends Room<GameState> {
         }
         this.pushHandTo(action.targetId);
       }
-      this.scheduleBot();
+      this.scheduleBot(true);
       return;
     }
 
@@ -544,25 +572,13 @@ export class LiteratureRoom extends Room<GameState> {
         // Bot's knowledge was stale — skip and advance turn to avoid infinite loop.
         ensureValidTurn(this.state, this.hands);
       }
-      this.scheduleBot();
+      this.scheduleBot(true);
       return;
     }
 
-    // Pass — bot has no valid ask (or is empty-handed).
-    if ((this.hands.get(bot.id) ?? []).length > 0) {
-      // Bot still has cards but buildCandidates was empty (e.g. all remaining
-      // cards in its sets are inferred on teammates and the inferred-declare
-      // check above was inconclusive). Force-advance to avoid an infinite
-      // retry loop where ensureValidTurn refuses to move the turn away.
-      const next = findNextPlayerWithCards(this.state, this.hands, bot.id);
-      if (next) {
-        pushAction(this.state, `${bot.name} has no valid ask — turn passes.`);
-        this.state.turnId = next;
-      }
-    } else {
-      ensureValidTurn(this.state, this.hands);
-    }
-    this.scheduleBot();
+    // Pass — bot has no cards left (or all remaining fallbacks exhausted).
+    ensureValidTurn(this.state, this.hands);
+    this.scheduleBot(true);
   }
 }
 

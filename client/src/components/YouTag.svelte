@@ -20,11 +20,13 @@
     isYourTurn: boolean;
     isEmpty: boolean;
     canDeclare: boolean;
+    /** True while an animation is in progress — show "busy" cue instead of action buttons. */
+    actionBusy?: boolean;
     onDeclare: () => void;
     onPassTo: (id: string) => void;
   }
 
-  let { you, room, isYourTurn, isEmpty, canDeclare, onDeclare, onPassTo }: Props = $props();
+  let { you, room, isYourTurn, isEmpty, canDeclare, actionBusy = false, onDeclare, onPassTo }: Props = $props();
 
   let isPendingTarget = $derived(
     room.pendingBotAsk?.targetId === you.id && !!room.pendingBotAsk?.askerId,
@@ -49,9 +51,17 @@
   aria-label="You: {you.name}"
 >
   <Avatar name={you.name} avatar={you.avatar} character={you.character} team={you.team} size={32} />
+  <span class="you-team" class:team-b={you.team === "B"}>Team {you.team}</span>
   <span class="you-name">{you.name}</span>
 
-  {#if canPass && passableTeammates.length > 0}
+  {#if actionBusy && isYourTurn}
+    <span class="you-busy">Action in progress…</span>
+  {:else if canPass && passableTeammates.length > 0}
+    {#if canDeclare}
+      <button type="button" class="you-declare-btn" onclick={onDeclare}>
+        Declare
+      </button>
+    {/if}
     <span class="you-pass-label">Pass to:</span>
     {#each passableTeammates as tm (tm.id)}
       <button type="button" class="you-pass-btn" onclick={() => onPassTo(tm.id)}>
@@ -108,6 +118,33 @@
     animation: none;
   }
 
+  .you-team {
+    font-size: 0.68rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--accent);
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(52, 211, 153, 0.14);
+    border: 1px solid rgba(52, 211, 153, 0.35);
+  }
+  .you-team.team-b {
+    color: #60a5fa;
+    background: rgba(96, 165, 250, 0.14);
+    border-color: rgba(96, 165, 250, 0.35);
+  }
+  .you-busy {
+    font-size: 0.78rem;
+    color: #fbbf24;
+    font-style: italic;
+    opacity: 0.85;
+    animation: you-busy-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes you-busy-pulse {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 0.45; }
+  }
   .you-name {
     font-weight: 700;
     font-size: 0.94rem;

@@ -137,4 +137,7 @@ export const MIN_PLAYERS = 4;
 export const MAX_PLAYERS = 10;
 export const SETS_TO_WIN = 5;
 export const PENDING_BOT_ASK_MS = 0; // no longer used — ask fires immediately after think
-export const BOT_THINK_MS = 1000;  // 1 s silent think before executing
+export const BOT_THINK_MS = 2200;  // 2.2 s silent think before executing
+/** Delay between resolving a bot action and scheduling the next bot think.
+ *  Must be >= the longest ask animation (~7.85 s for a successful ask). */
+export const POST_BOT_ACTION_DELAY_MS = 8000;

@@ -109,7 +109,7 @@
     <div class="sidebar-section logs-section">
       <h3 class="section-title">Recent Activity</h3>
       <div class="logs-list">
-        {#each room.actions.slice(0, 8) as action (action)}
+        {#each room.actions.slice(0, 8) as action, i (i + ":" + action)}
           <div class="log-entry">{action}</div>
         {/each}
       </div>
@@ -124,9 +124,9 @@
   .sidebar {
     position: fixed;
     right: -380px;
-    top: 0;
+    top: var(--header-h);
     width: 380px;
-    height: 100vh;
+    height: calc(100vh - var(--header-h));
     background: rgba(8, 18, 12, 0.98);
     border-left: 1px solid var(--panel-border);
     backdrop-filter: blur(16px);

@@ -69,6 +69,10 @@
       room.turnId === game.playerId &&
       availableSets.length > 0,
   );
+
+  function playerLabel(p: PlayerSnapshot): string {
+    return p.id === game.playerId ? "You" : p.name;
+  }
 </script>
 
 <div class="modal-backdrop" onclick={onClose} role="presentation" transition:fade={{ duration: 180 }}></div>
@@ -77,7 +81,7 @@
   <header class="modal-header">
     <div>
       <div class="modal-title">Declare a set</div>
-      <div class="modal-sub">Assign every card to the teammate who holds it.</div>
+      <div class="modal-sub">Pick who holds each card in the set.</div>
     </div>
     <button class="modal-close" aria-label="Close" onclick={onClose}>×</button>
   </header>
@@ -96,20 +100,39 @@
     </div>
 
     {#if selectedSet}
-      <div class="declare-rows">
+      <div class="assign-grid" style="--player-count: {teammates.length}">
+        <!-- Header row: player name labels -->
+        <div class="grid-spacer"></div>
+        {#each teammates as t (t.id)}
+          <div class="player-col-label" class:is-you={t.id === game.playerId}>
+            {playerLabel(t)}
+          </div>
+        {/each}
+
+        <!-- One row per card -->
         {#each SET_LOOKUP[selectedSet].cards as card (card)}
           {@const info = cardShort(card)}
-          <div class="declare-row">
-            <span class="declare-card-chip {info.red ? 'red' : 'black'}">
-              {info.rank}{info.symbol}
-            </span>
-            <select class="input" bind:value={assignments[card]}>
-              <option value="">who has it?</option>
-              {#each teammates as t (t.id)}
-                <option value={t.id}>{t.id === game.playerId ? "You" : t.name}</option>
-              {/each}
-            </select>
-          </div>
+          {@const isMyCard = hand.includes(card)}
+          <span class="card-chip {info.red ? 'red' : 'black'}">
+            {info.rank}{info.symbol}
+          </span>
+          {#each teammates as t (t.id)}
+            {@const selected = assignments[card] === t.id}
+            <button
+              class="player-cell"
+              class:selected
+              class:is-you={t.id === game.playerId}
+              class:locked={isMyCard && t.id === game.playerId}
+              disabled={isMyCard && t.id !== game.playerId}
+              onclick={() => { assignments[card] = t.id; }}
+              aria-label="{info.rank}{info.symbol} → {playerLabel(t)}"
+              aria-pressed={selected}
+            >
+              {#if selected}
+                <span class="check-mark">✓</span>
+              {/if}
+            </button>
+          {/each}
         {/each}
       </div>
 
@@ -135,7 +158,7 @@
     left: 50%;
     transform: translate(-50%, -50%);
     z-index: 390;
-    width: min(440px, calc(100vw - 24px));
+    width: min(480px, calc(100vw - 24px));
     max-height: calc(100vh - 60px);
     overflow-y: auto;
     background: rgba(10, 22, 14, 0.97);
@@ -172,30 +195,95 @@
   }
   .modal-close:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
 
-  .declare-rows {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+  /* Assignment grid: first col = card chip, remaining cols = one per player */
+  .assign-grid {
+    display: grid;
+    /* first col for the card chip, rest auto-sized equally for players */
+    grid-template-columns: auto repeat(var(--player-count, 3), 1fr);
+    gap: 5px 6px;
     margin: 12px 0;
-  }
-  .declare-row {
-    display: flex;
     align-items: center;
-    gap: 10px;
   }
-  .declare-card-chip {
+
+  .grid-spacer { /* empty top-left corner cell */ }
+
+  .player-col-label {
+    text-align: center;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    padding-bottom: 2px;
+  }
+  .player-col-label.is-you {
+    color: var(--accent);
+  }
+
+  .card-chip {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 50px;
-    padding: 4px 8px;
+    min-width: 46px;
+    padding: 5px 7px;
     border-radius: 6px;
     background: var(--card-bg);
     font-weight: 800;
-    font-size: 0.92rem;
+    font-size: 0.88rem;
+    white-space: nowrap;
   }
-  .declare-card-chip.red { color: var(--card-red); }
-  .declare-card-chip.black { color: var(--card-black); }
+  .card-chip.red  { color: var(--card-red); }
+  .card-chip.black { color: var(--card-black); }
+
+  .player-cell {
+    height: 34px;
+    border-radius: 7px;
+    border: 1.5px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.03);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition:
+      background 0.14s var(--ease-out),
+      border-color 0.14s var(--ease-out),
+      transform 0.12s var(--ease-spring);
+    font-size: 0.9rem;
+  }
+  .player-cell:not(:disabled):hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.22);
+    transform: scale(1.06);
+  }
+  .player-cell.selected {
+    background: rgba(52, 211, 153, 0.16);
+    border-color: var(--accent);
+  }
+  .player-cell.selected.is-you {
+    background: rgba(52, 211, 153, 0.22);
+  }
+  /* The current player's own card: pre-selected and visually locked */
+  .player-cell.locked {
+    background: rgba(52, 211, 153, 0.22);
+    border-color: var(--accent);
+    cursor: default;
+  }
+  .player-cell:disabled:not(.locked) {
+    opacity: 0.2;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .check-mark {
+    color: var(--accent);
+    font-weight: 800;
+    font-size: 0.85rem;
+    line-height: 1;
+    pointer-events: none;
+  }
+  .player-cell.locked .check-mark {
+    opacity: 0.9;
+  }
 
   .modal-actions {
     display: flex;

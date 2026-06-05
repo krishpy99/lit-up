@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import type { PlayerSnapshot, RoomSnapshot } from "../lib/client.svelte";
+  import { game } from "../lib/client.svelte";
   import Seat from "./Seat.svelte";
   import Scoreboard from "./Scoreboard.svelte";
 
@@ -70,6 +71,17 @@
         {room.winnerTeam ? `Team ${room.winnerTeam} wins! 🎉` : "Game tied"}
       </div>
       <div class="sub">{room.scoreA} – {room.scoreB}</div>
+      <div class="over-actions">
+        {#if game.isHost}
+          <button class="btn btn-primary btn-sm" onclick={() => game.resetGame()}>
+            Back to room
+          </button>
+        {:else}
+          <button class="btn btn-ghost btn-sm" onclick={() => game.leave()}>
+            Leave
+          </button>
+        {/if}
+      </div>
     </div>
   {/if}
 

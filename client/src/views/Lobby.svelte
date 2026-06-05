@@ -37,14 +37,14 @@
         </h2>
         <p class="muted">Share the invite link to bring in friends.</p>
       </div>
-      <div class="lobby-header-actions">
-        <button class="btn btn-ghost btn-sm" onclick={copyInvite}>
-          {inviteCopied ? "Copied!" : "Copy invite"}
-        </button>
-        <button class="btn btn-ghost btn-sm" onclick={() => game.leave()}>Leave</button>
-      </div>
+      <button class="btn btn-danger btn-sm" onclick={() => game.leave()}>Leave</button>
     </div>
-    <input class="input" readonly value={game.inviteUrl()} />
+    <div class="invite-row">
+      <input class="input invite-input" readonly value={game.inviteUrl()} />
+      <button class="btn btn-ghost btn-sm invite-copy-btn" onclick={copyInvite}>
+        {inviteCopied ? "Copied!" : "Copy link"}
+      </button>
+    </div>
 
     {#if game.isHost}
       <div class="lobby-host-controls">
@@ -114,17 +114,28 @@
       {/if}
     </div>
 
-    <div class="player-grid">
-      {#each room.players as p (p.id)}
-        <div class="player-card" class:team-b={p.team === "B"}>
-          <Avatar name={p.name} avatar={p.avatar} character={p.character} team={p.team} size={42} />
-          <div class="player-meta">
-            <strong>
-              {p.id === game.playerId ? `${p.name} (you)` : p.name}
-              {#if p.isHost}<span class="muted"> · host</span>{/if}
-              {#if p.isBot}<span class="muted"> · bot</span>{/if}
-            </strong>
-            <span>{p.connected ? "Ready" : "⚠ Disconnected"}</span>
+    <div class="teams-grid">
+      {#each (["A", "B"] as const) as team (team)}
+        {@const teamPlayers = room.players.filter((p) => p.team === team)}
+        <div class="team-column">
+          <div class="team-heading team-heading-{team.toLowerCase()}">Team {team}</div>
+          <div class="player-grid">
+            {#each teamPlayers as p (p.id)}
+              <div class="player-card" class:team-b={p.team === "B"}>
+                <Avatar name={p.name} avatar={p.avatar} character={p.character} team={p.team} size={42} />
+                <div class="player-meta">
+                  <strong>
+                    {p.id === game.playerId ? `${p.name} (you)` : p.name}
+                    {#if p.isHost}<span class="muted"> · host</span>{/if}
+                    {#if p.isBot}<span class="muted"> · bot</span>{/if}
+                  </strong>
+                  <span>{p.connected ? "Ready" : "⚠ Disconnected"}</span>
+                </div>
+              </div>
+            {/each}
+            {#if teamPlayers.length === 0}
+              <p class="muted empty-team">No players yet.</p>
+            {/if}
           </div>
         </div>
       {/each}
@@ -142,10 +153,19 @@
     margin-bottom: 14px;
     flex-wrap: wrap;
   }
-  .lobby-header-actions {
+  .invite-row {
     display: flex;
     gap: 8px;
-    flex-wrap: wrap;
+    align-items: stretch;
+    margin-bottom: 0;
+  }
+  .invite-input {
+    flex: 1;
+    min-width: 0;
+  }
+  .invite-copy-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .lobby-host-controls {
     margin-top: 16px;
@@ -160,6 +180,43 @@
   .lobby-hint {
     margin-top: 12px;
     font-size: 0.82rem;
+  }
+  .teams-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 4px;
+  }
+  @media (max-width: 560px) {
+    .teams-grid { grid-template-columns: 1fr; }
+  }
+  .team-column {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .team-heading {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    padding: 3px 8px;
+    border-radius: 5px;
+  }
+  .team-heading-a {
+    color: var(--team-a-text);
+    background: rgba(241, 245, 249, 0.08);
+    border-left: 3px solid var(--team-a);
+  }
+  .team-heading-b {
+    color: var(--team-b-text);
+    background: rgba(148, 163, 184, 0.08);
+    border-left: 3px solid rgba(148, 163, 184, 0.5);
+  }
+  .empty-team {
+    font-size: 0.8rem;
+    font-style: italic;
+    padding: 6px 0;
   }
   .toggle-row {
     display: flex;

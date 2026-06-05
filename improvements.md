@@ -1,0 +1,7 @@
+- remove bots should be removing in pairs until it is even.. or I am the only player left. still not working, when there are three per team and I try to remove bots, all the bots get removed and only I am left. ideally there should be 3 bots and me left. 6 -> 4 players.
+- card disappeared from my deck even before the opponent's cloud came to me. this is still happening and the converse too. if I ask for a card it appears on my deck before the animation reaches the opponent.. card adding to my deck and removing from my deck should also be part of the main event loop on the front end. the order should be card asked (cloud) -> card added / removed from deck -> card comes back (solid card) -> card added to deck of me/opponent. 
+- if I try to perform a series of actions, it waits for the first action to complete and the rest of the cards come to my set together. (that should not be the case, actions should be happening one by one)
+- I want the declare option after I declare apart from passing to teammates and asking cards
+- i want a fireworks like thing that comes after the default solitaire game in windows after one team wins.
+- the sidebar itself seems useless now.. we can have a pain open on top of the player clicked showing rows of cards that the user can ask.
+- there should be a back to room button when game ends.

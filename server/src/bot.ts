@@ -236,7 +236,15 @@ export function decideBotAction(
 
   // 2. Build candidates, score, and pick the best.
   const candidates = buildCandidates(ctx);
-  if (candidates.length === 0) return { type: "pass" };
+  if (candidates.length === 0) {
+    // No scored candidate found (e.g. all known cards are on own team, but
+    // declare check above was inconclusive). Fall back to a random legal ask
+    // so the turn does not get silently skipped. A turn pass with cards in
+    // hand is never a valid game state — the bot must ask for *something*.
+    const fallback = pickRandomAsk(ctx);
+    if (fallback) return fallback;
+    return { type: "pass" };
+  }
 
   candidates.sort((a, b) => b.score - a.score);
   // Break ties randomly among the top-scoring group.
@@ -583,6 +591,36 @@ function scoreAsk(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Last-resort random ask: iterate all cards the bot could legally ask for
+ * (including sets not yet opened) and pick a random one with a random
+ * eligible opponent as the target. This is called only when buildCandidates
+ * returns empty, which can happen when all candidate cards are probabilistically
+ * determined to be on the bot's own team but the declare checks still failed.
+ * Asking randomly is always better than silently passing a turn.
+ */
+function pickRandomAsk(ctx: BotCtx): BotAction | null {
+  const askable: { card: Card; opponents: string[] }[] = [];
+
+  for (const card of ALL_CARDS) {
+    const setKey = CARD_TO_SET.get(card);
+    if (!setKey) continue;
+    if (ctx.claimed.has(setKey)) continue;
+    if (ctx.myHand.includes(card)) continue;
+    if (!ctx.myHand.some(c => CARD_TO_SET.get(c) === setKey)) continue;
+    const eligibleOpponents = ctx.opponents
+      .filter(o => (ctx.hands.get(o.id) ?? []).length > 0)
+      .map(o => o.id);
+    if (eligibleOpponents.length === 0) continue;
+    askable.push({ card, opponents: eligibleOpponents });
+  }
+
+  if (askable.length === 0) return null;
+  const pick = askable[Math.floor(Math.random() * askable.length)];
+  const targetId = pick.opponents[Math.floor(Math.random() * pick.opponents.length)];
+  return { type: "ask", card: pick.card, targetId };
+}
 
 /** Legal ask: own a card in the same set, don't hold the card, set unclaimed. */
 function isAskable(card: Card, ctx: BotCtx): boolean {

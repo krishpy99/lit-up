@@ -1,5 +1,6 @@
 <script lang="ts">
   import Avatar from "./Avatar.svelte";
+  import { cardShort } from "@lit-up/shared";
   import type { PlayerSnapshot, RoomSnapshot } from "../lib/client.svelte";
 
   interface Props {
@@ -132,6 +133,7 @@
       <span class="seat-name">
         {player.name}{player.isBot ? " 🤖" : ""}
       </span>
+      <span class="seat-team-pill team-{player.team.toLowerCase()}">{player.team}</span>
       {#if room.notesEnabled && !isYou}
         <button
           type="button"

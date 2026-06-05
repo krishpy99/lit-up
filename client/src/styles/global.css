@@ -103,6 +103,17 @@ input, select, textarea {
   transform: translateY(-1px);
 }
 
+.btn-danger {
+  background: rgba(248, 113, 113, 0.16);
+  color: var(--danger);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+}
+.btn-danger:not(:disabled):hover {
+  background: rgba(248, 113, 113, 0.28);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(248, 113, 113, 0.25);
+}
+
 .btn-sm {
   padding: 6px 12px;
   font-size: 0.78rem;

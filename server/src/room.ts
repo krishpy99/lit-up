@@ -493,7 +493,7 @@ export class LiteratureRoom extends Room<GameState> {
     if (typeof msg?.defaultLogCount === "number") {
       const n = Math.floor(msg.defaultLogCount);
       // 0 = "all"; otherwise clamp to a sane visible range.
-      this.state.defaultLogCount = n === 0 ? 0 : Math.min(20, Math.max(1, n));
+      this.state.defaultLogCount = n === 0 ? 0 : Math.max(1, n);
     }
   }
 

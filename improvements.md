@@ -1,7 +1,65 @@
-- remove bots should be removing in pairs until it is even.. or I am the only player left. still not working, when there are three per team and I try to remove bots, all the bots get removed and only I am left. ideally there should be 3 bots and me left. 6 -> 4 players.
-- card disappeared from my deck even before the opponent's cloud came to me. this is still happening and the converse too. if I ask for a card it appears on my deck before the animation reaches the opponent.. card adding to my deck and removing from my deck should also be part of the main event loop on the front end. the order should be card asked (cloud) -> card added / removed from deck -> card comes back (solid card) -> card added to deck of me/opponent. 
-- if I try to perform a series of actions, it waits for the first action to complete and the rest of the cards come to my set together. (that should not be the case, actions should be happening one by one)
-- I want the declare option after I declare apart from passing to teammates and asking cards
-- i want a fireworks like thing that comes after the default solitaire game in windows after one team wins.
-- the sidebar itself seems useless now.. we can have a pain open on top of the player clicked showing rows of cards that the user can ask.
-- there should be a back to room button when game ends.
+- the logs are not correct. somehow logs are disappearing, filtering gives poor set of transactions that cannot be trusted. 
+- tracked stuff should not be in logs, just the transactions of what happened
+- for some reason in my hosted game, it keeps restarting the server. these are the logs:-
+==> Deploying...
+==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+==> Running 'npm start'
+> lit-up@0.2.0 start
+> npm run start -w server
+> @lit-up/server@0.2.0 start
+> node dist/index.js
+       ___      _
+      / __\___ | |_   _ ___  ___ _   _ ___
+     / /  / _ \| | | | / __|/ _ \ | | / __|
+    / /__| (_) | | |_| \__ \  __/ |_| \__ \
+    \____/\___/|_|\__, |___/\___|\__,_|___/
+                  |___/
+     · Multiplayer Framework for Node.js ·
+💖 Consider becoming a Sponsor on GitHub → https://github.com/sponsors/endel
+🌟 Give us a star on GitHub → https://github.com/colyseus/colyseus
+☁️  Deploy and scale your project on Colyseus Cloud → https://cloud.colyseus.io
+[lit-up] Colyseus listening on :10000
+[lit-up] Serving client from /opt/render/project/src/client/dist
+==> Your service is live 🎉
+==> 
+==> ///////////////////////////////////////////////////////////
+==> 
+==> Available at your primary URL https://lit-up.onrender.com
+==> 
+==> ///////////////////////////////////////////////////////////
+==> Detected service running on port 10000
+==> Docs on specifying a port: https://render.com/docs/web-services#port-binding
+==> Running 'npm start'
+> lit-up@0.2.0 start
+> npm run start -w server
+> @lit-up/server@0.2.0 start
+> node dist/index.js
+       ___      _
+      / __\___ | |_   _ ___  ___ _   _ ___
+     / /  / _ \| | | | / __|/ _ \ | | / __|
+    / /__| (_) | | |_| \__ \  __/ |_| \__ \
+    \____/\___/|_|\__, |___/\___|\__,_|___/
+                  |___/
+     · Multiplayer Framework for Node.js ·
+💖 Consider becoming a Sponsor on GitHub → https://github.com/sponsors/endel
+🌟 Give us a star on GitHub → https://github.com/colyseus/colyseus
+☁️  Deploy and scale your project on Colyseus Cloud → https://cloud.colyseus.io
+[lit-up] Colyseus listening on :10000
+[lit-up] Serving client from /opt/render/project/src/client/dist
+> lit-up@0.2.0 start
+> npm run start -w server
+> @lit-up/server@0.2.0 start
+> node dist/index.js
+       ___      _
+      / __\___ | |_   _ ___  ___ _   _ ___
+     / /  / _ \| | | | / __|/ _ \ | | / __|
+    / /__| (_) | | |_| \__ \  __/ |_| \__ \
+    \____/\___/|_|\__, |___/\___|\__,_|___/
+                  |___/
+     · Multiplayer Framework for Node.js ·
+💖 Consider becoming a Sponsor on GitHub → https://github.com/sponsors/endel
+🌟 Give us a star on GitHub → https://github.com/colyseus/colyseus
+☁️  Deploy and scale your project on Colyseus Cloud → https://cloud.colyseus.io
+[lit-up] Colyseus listening on :10000
+[lit-up] Serving client from /opt/render/project/src/client/dist
+- we might also need a way to connect and reconnect people back to rooms. This might be a larger project. might take some planning.

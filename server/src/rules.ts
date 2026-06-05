@@ -18,8 +18,6 @@ import {
 import { ArraySchema } from "@colyseus/schema";
 import { GameState, Player } from "./schema.js";
 
-const ACTIONS_CAP = 20;
-
 // ── Pure helpers ─────────────────────────────────────────────
 
 export function shuffle<T>(arr: T[]): T[] {
@@ -44,7 +42,6 @@ export function totalClaimed(state: GameState): number {
 
 export function pushAction(state: GameState, text: string): void {
   state.actions.unshift(text);
-  while (state.actions.length > ACTIONS_CAP) state.actions.pop();
 }
 
 // ── Hand store (server-only, never synced) ─────────────────

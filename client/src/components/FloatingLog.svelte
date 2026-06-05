@@ -48,9 +48,8 @@
     selectedHalf = selectedHalf === half ? null : half;
   }
 
-  // The host picks how many recent transactions to display.
-  // 0 = "all" (server-capped at 20). Apply set filter first so the count
-  // limit isn't consumed by entries that won't be shown anyway.
+  // 0 = show all. Apply set filter first so the count limit isn't consumed
+  // by entries that won't be shown anyway.
   let actions = $derived.by(() => {
     let list = room.actions;
     if (activeSetKeys.length > 0) {

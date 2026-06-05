@@ -48,14 +48,16 @@
     selectedHalf = selectedHalf === half ? null : half;
   }
 
-  // The host picks how many recent transactions to display in the lobby.
-  // 0 = "all" (server-capped at 20). This is locked once the game starts.
+  // The host picks how many recent transactions to display.
+  // 0 = "all" (server-capped at 20). Apply set filter first so the count
+  // limit isn't consumed by entries that won't be shown anyway.
   let actions = $derived.by(() => {
-    let list = room.defaultLogCount === 0
-      ? room.actions
-      : room.actions.slice(0, room.defaultLogCount);
+    let list = room.actions;
     if (activeSetKeys.length > 0) {
       list = list.filter((t) => activeSetKeys.some(k => actionBelongsToSet(t, k)));
+    }
+    if (room.defaultLogCount !== 0) {
+      list = list.slice(0, room.defaultLogCount);
     }
     return list;
   });

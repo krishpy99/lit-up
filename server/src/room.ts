@@ -526,9 +526,6 @@ export class LiteratureRoom extends Room<GameState> {
     const action = decideBotAction(this.state, this.hands, this.knowledge, this.transactions, bot);
 
     if (action.type === "ask") {
-      // Capture certainty BEFORE ask mutates knowledge (for proof logging).
-      const certainHolder = this.knowledge.get(action.card)?.holder;
-
       const err = applyAsk(
         this.state,
         this.hands,
@@ -542,13 +539,6 @@ export class LiteratureRoom extends Room<GameState> {
         pushAction(this.state, err);
         ensureValidTurn(this.state, this.hands);
       } else {
-        // Proof that the knowledge tracker is working: when ck.holder had
-        // already confirmed the target was holding this card, log it so
-        // players can see the bot's inference in the action log.
-        if (certainHolder === action.targetId) {
-          const target = this.state.players.get(action.targetId);
-          pushAction(this.state, `🧠 ${bot.name} tracked: knew ${target?.name ?? "?"} had that card`);
-        }
         this.pushHandTo(action.targetId);
       }
       this.scheduleBot(true);

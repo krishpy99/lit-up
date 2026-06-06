@@ -230,6 +230,7 @@
     overflow: hidden;
   }
   .log-panel-header {
+    flex-shrink: 0;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -251,6 +252,7 @@
   }
   .log-close:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
   .log-filter-strip {
+    flex-shrink: 0;
     display: flex;
     flex-wrap: nowrap;
     overflow-x: auto;
@@ -315,6 +317,8 @@
   }
 
   .log-list {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 8px 14px 14px;
     display: flex;

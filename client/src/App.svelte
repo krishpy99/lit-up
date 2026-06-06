@@ -10,15 +10,18 @@
   import BgFloaters from "./components/BgFloaters.svelte";
 
   let rulesOpen = $state(false);
-  let prefilledCode = $state("");
+
+  // derive synchronously — window is always defined in this SPA
+  const _initialCode = typeof window !== "undefined"
+    ? (new URL(window.location.href).searchParams.get("room") ?? "").toUpperCase()
+    : "";
+  let prefilledCode = $state(_initialCode);
 
   $effect(() => {
     document.body.classList.toggle("in-game", game.view === "game");
   });
 
   onMount(async () => {
-    const code = new URL(window.location.href).searchParams.get("room");
-    if (code) prefilledCode = code.toUpperCase();
     // Silently restore session if the user refreshed mid-game.
     await game.tryAutoReconnect();
   });

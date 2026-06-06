@@ -464,19 +464,24 @@ export function animateDeclare(
             bubble.style.transition = `opacity ${REVEAL_DURATION}ms ease`;
             rAF2(() => { bubble.style.opacity = "1"; });
 
-            // After reveal completes: remove bubble, fire flyCard concurrently.
+            // After reveal completes: slide the existing bubble to center (same CSS
+            // left/top technique as spawnReturnCard — no Motion pop-in/pop-out).
             const p = new Promise<void>((res) => {
               setTimeout(() => {
-                bubble.remove();
-                if (!centerRect) { res(); return; }
-                const sourceEl = getSeatEl(sources[card]);
-                if (!sourceEl) { res(); return; }
-                flyCard({
-                  from: sourceEl,
-                  to: centerRect,
-                  card: card as Card,
-                  duration: effectiveDeclReturnMs / 1000,
-                }).then(res);
+                if (!centerRect) { bubble.remove(); res(); return; }
+                const offsetX = (revealIdx - (bubbles.length - 1) / 2) * (SCALED_W + 4);
+                const toX = centerRect.left + centerRect.width  / 2 - SCALED_W / 2 + offsetX;
+                const toY = centerRect.top  + centerRect.height / 2 - SCALED_H / 2;
+                bubble.style.transition = `left ${effectiveDeclReturnMs}ms linear, top ${effectiveDeclReturnMs}ms linear`;
+                rAF2(() => {
+                  bubble.style.left = `${toX}px`;
+                  bubble.style.top  = `${toY}px`;
+                });
+                setTimeout(() => {
+                  bubble.style.transition = `opacity 250ms ease-in`;
+                  rAF2(() => { bubble.style.opacity = "0"; });
+                  setTimeout(() => { bubble.remove(); res(); }, 260);
+                }, effectiveDeclReturnMs);
               }, REVEAL_DURATION);
             });
             flyCardPromises.push(p);

@@ -355,10 +355,17 @@ export function animateDeclare(
     style.textContent = `
       @keyframes declare-wrong-wiggle {
         0%,100% { transform: scale(0.7) translateX(0); }
-        20%     { transform: scale(0.7) translateX(-6px); }
-        40%     { transform: scale(0.7) translateX(6px); }
-        60%     { transform: scale(0.7) translateX(-5px); }
-        80%     { transform: scale(0.7) translateX(5px); }
+        20%     { transform: scale(0.7) translateX(-8px); }
+        40%     { transform: scale(0.7) translateX(8px); }
+        60%     { transform: scale(0.7) translateX(-6px); }
+        80%     { transform: scale(0.7) translateX(6px); }
+      }
+      @keyframes declare-wrong-wiggle-solid {
+        0%,100% { transform: translateX(0); }
+        20%     { transform: translateX(-8px); }
+        40%     { transform: translateX(8px); }
+        60%     { transform: translateX(-6px); }
+        80%     { transform: translateX(6px); }
       }
     `;
     document.head.appendChild(style);
@@ -525,7 +532,7 @@ export function animateDeclare(
       const wrongFadePromise = new Promise<void>((res) => {
         setTimeout(() => {
           for (const { bubble, indicator } of wrongEntries) {
-            // Shake then fade the wrong bubble.
+            // Wiggle then fade the translucent bubble at the wrong seat.
             bubble.style.animation = `declare-wrong-wiggle 400ms ease`;
             setTimeout(() => {
               bubble.style.animation = "";
@@ -534,20 +541,28 @@ export function animateDeclare(
               setTimeout(() => bubble.remove(), DECLARE_FADE_MS + 50);
             }, 400);
 
-            // Fade the indicator card simultaneously.
+            // Wiggle the solid indicator using the scale-free keyframe.
+            // It stays visible — fades out only after correct cards finish flying.
             if (indicator) {
-              indicator.style.transition = `opacity ${DECLARE_FADE_MS}ms ease-in`;
-              rAF2(() => { indicator!.style.opacity = "0"; });
-              setTimeout(() => indicator!.remove(), DECLARE_FADE_MS + 50);
+              indicator.style.animation = `declare-wrong-wiggle-solid 400ms ease`;
+              setTimeout(() => { indicator!.style.animation = ""; }, 410);
             }
           }
-          // Resolve after shake + fade completes.
           setTimeout(res, 400 + DECLARE_FADE_MS + 100);
         }, allRevealsStartedMs);
       });
 
-      // Wait for flyCards (if any) and wrong fade-outs.
-      Promise.all([...flyCardPromises, wrongFadePromise]).then(() => resolve());
+      // Wait for flyCards and wrong bubble fade-outs, then fade solid indicators.
+      Promise.all([...flyCardPromises, wrongFadePromise]).then(() => {
+        for (const { indicator } of wrongEntries) {
+          if (indicator) {
+            indicator.style.transition = `opacity 400ms ease-in`;
+            rAF2(() => { indicator!.style.opacity = "0"; });
+            setTimeout(() => indicator!.remove(), 450);
+          }
+        }
+        setTimeout(resolve, wrongEntries.some(e => e.indicator) ? 460 : 0);
+      });
     }, allLandedMs);
   });
 }

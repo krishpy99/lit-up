@@ -57,6 +57,8 @@ export interface LastDeclareSnapshot {
   success: boolean;
   /** Map of card → playerId who held it at declare time. */
   sources: Record<Card, string>;
+  /** Map of card → playerId the declarer claimed held it. */
+  assignments: Record<Card, string>;
   at: number;
 }
 
@@ -575,6 +577,7 @@ function snapshotRoom(state: unknown): RoomSnapshot {
       winningTeam: "" | "A" | "B";
       success: boolean;
       sources: { forEach(cb: (value: string, key: string) => void): void };
+      assignments: { forEach(cb: (value: string, key: string) => void): void };
       at: number;
     };
     botDifficulty: BotDifficulty;
@@ -632,13 +635,20 @@ function snapshotLastDeclare(
   src: { declarerId?: string; setKey?: string; at?: number } | undefined,
 ): LastDeclareSnapshot | null {
   if (!src || !src.setKey) return null;
-  const sources: Record<Card, string> = {};
-  const map = (src as unknown as {
+  const raw = src as unknown as {
     sources?: { forEach(cb: (v: string, k: string) => void): void };
-  }).sources;
-  if (map && typeof map.forEach === "function") {
-    map.forEach((holderId: string, card: string) => {
+    assignments?: { forEach(cb: (v: string, k: string) => void): void };
+  };
+  const sources: Record<Card, string> = {};
+  if (raw.sources && typeof raw.sources.forEach === "function") {
+    raw.sources.forEach((holderId: string, card: string) => {
       sources[card] = holderId;
+    });
+  }
+  const assignments: Record<Card, string> = {};
+  if (raw.assignments && typeof raw.assignments.forEach === "function") {
+    raw.assignments.forEach((holderId: string, card: string) => {
+      assignments[card] = holderId;
     });
   }
   return {
@@ -647,6 +657,7 @@ function snapshotLastDeclare(
     winningTeam: (src as { winningTeam: "" | "A" | "B" }).winningTeam,
     success: (src as { success: boolean }).success,
     sources,
+    assignments,
     at: (src as { at: number }).at,
   };
 }

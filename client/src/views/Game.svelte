@@ -144,7 +144,10 @@
       const decl = snapshot.lastDeclare;
       if (decl) {
         await animateDeclare(
+          decl.declarerId,
+          decl.assignments,
           decl.sources,
+          decl.success,
           (id) => document.getElementById(`seat-${id}`),
           () => document.querySelector<HTMLElement>(".felt-center"),
         );

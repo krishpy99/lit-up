@@ -59,7 +59,8 @@ export class LastDeclare extends Schema {
   @type("string") setKey: string = "";
   @type("string") winningTeam: string = "";
   @type("boolean") success: boolean = false;
-  @type({ map: "string" }) sources = new MapSchema<string>();
+  @type({ map: "string" }) sources = new MapSchema<string>();    // actual positions
+  @type({ map: "string" }) assignments = new MapSchema<string>(); // declarer's claims
   @type("number") at: number = 0;
 }
 

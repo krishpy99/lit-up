@@ -163,6 +163,7 @@ export function startGame(state: GameState, hands: HandStore, txLog: Transaction
   state.pendingBotAsk.assign({ askerId: "", targetId: "", card: "" });
   state.lastDeclare.assign({ declarerId: "", setKey: "", winningTeam: "", success: false, at: 0 });
   state.lastDeclare.sources.clear();
+  state.lastDeclare.assignments.clear();
   state.postDeclareId = "";
 
   const ids = [...state.players.keys()];
@@ -196,6 +197,7 @@ export function resetToLobby(state: GameState, hands: HandStore, txLog: Transact
   state.pendingBotAsk.assign({ askerId: "", targetId: "", card: "" });
   state.lastDeclare.assign({ declarerId: "", setKey: "", winningTeam: "", success: false, at: 0 });
   state.lastDeclare.sources.clear();
+  state.lastDeclare.assignments.clear();
   state.postDeclareId = "";
 
   // Drop disconnected non-host players.
@@ -346,6 +348,11 @@ export function applyDeclare(
   state.lastDeclare.sources.clear();
   for (const [card, holderId] of Object.entries(sources)) {
     state.lastDeclare.sources.set(card, holderId);
+  }
+  // Populate the declarer's claimed assignments (scoped to this set's cards only).
+  state.lastDeclare.assignments.clear();
+  for (const card of set.cards) {
+    if (assignments[card]) state.lastDeclare.assignments.set(card, assignments[card]);
   }
 
   // Remove the set's cards from all hands (the set is now off the table).

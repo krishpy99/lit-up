@@ -20,7 +20,7 @@
  */
 
 import { animate } from "motion";
-import { cardShort, type Card } from "@lit-up/shared";
+import { cardShort, DECLARE_BUBBLE_MS, DECLARE_RETURN_MS, type Card } from "@lit-up/shared";
 
 // ── Animation timing constants ────────────────────────────────────────────────
 // All values are in milliseconds unless otherwise noted.
@@ -301,44 +301,192 @@ function spawnReturnCard(
 
 // ── Declare animation ────────────────────────────────────────────────────────
 
+// Env-var overrides (baked in at build time via Vite).
+const effectiveDeclBubbleMs = Number(import.meta.env.VITE_DECLARE_BUBBLE_MS) || DECLARE_BUBBLE_MS;
+const effectiveDeclReturnMs = Number(import.meta.env.VITE_DECLARE_RETURN_MS) || DECLARE_RETURN_MS;
+
+// Internal declare timing constants (all ms).
+const DECLARE_BUBBLE_STAGGER_MS = 80;  // stagger between outbound bubble launches
+const DECLARE_WRONG_POP_MS      = 300; // scale-in pop for wrong-position indicator
+const DECLARE_WRONG_FADE_MS     = 300; // fade-out for wrong indicators
+
 /**
- * Fly all six cards in a declare from their holders' seats to the felt center.
- * Returns a Promise that resolves only after ALL card flights have landed.
+ * 2-phase declare animation:
+ *   Phase 1 — Outbound bubbles launch from declarer → each assigned holder,
+ *              all simultaneously with ~80 ms stagger, arriving at effectiveDeclBubbleMs.
+ *   Phase 2 — Immediately on arrival: correct → bubble dissolves, solid card flies
+ *              from actual holder to felt center; wrong → bubble turns red/dim,
+ *              solid card pops in at actual holder then fades out.
  *
- * @param sources  Record<card, holderId> from LastDeclareSnapshot.sources
- * @param getSeatEl  Callback that returns the seat HTMLElement for a given playerId
- * @param getCenterEl  Callback that returns the felt-center HTMLElement
+ * Promise resolves when all reveal animations complete.
  */
 export function animateDeclare(
-  sources: Record<string, string>,
+  declarerId: string,
+  assignments: Record<string, string>,  // card → assigned holderId (declarer's claim)
+  sources: Record<string, string>,       // card → actual holderId
+  success: boolean,
   getSeatEl: (playerId: string) => HTMLElement | null,
   getCenterEl: () => HTMLElement | null,
 ): Promise<void> {
-  const center = getCenterEl();
-  if (!center) return Promise.resolve();
-  const targetRect = center.getBoundingClientRect();
-  const cards = Object.entries(sources);
-  const flights: Promise<void>[] = [];
+  const layer = ensureLayer();
+  const declarerEl = getSeatEl(declarerId);
+  if (!declarerEl) return Promise.resolve();
 
-  cards.forEach(([card, holderId], i) => {
-    const fromEl = getSeatEl(holderId);
-    if (!fromEl) return;
-    const offsetX = (i - (cards.length - 1) / 2) * 18;
-    const dest = new DOMRect(
-      targetRect.left + offsetX,
-      targetRect.top - 18,
-      targetRect.width,
-      targetRect.height,
-    );
-    const flight = new Promise<void>((resolve) => {
+  const cards = Object.keys(sources);
+  const W = 84, H = 120;
+
+  // Spawn one outbound bubble per card — all launch simultaneously with small stagger.
+  const bubbleEls: { el: HTMLElement; assignedId: string; card: string }[] = [];
+
+  cards.forEach((card, i) => {
+    const assignedId = assignments[card];
+    if (!assignedId) return;
+    const targetEl = getSeatEl(assignedId);
+    if (!targetEl) return;
+
+    const fromRect = declarerEl.getBoundingClientRect();
+    const toRect   = targetEl.getBoundingClientRect();
+    const { rank, symbol, red } = cardShort(card as Card);
+
+    const fromX = fromRect.left + fromRect.width  / 2 - W / 2;
+    const fromY = fromRect.top  + fromRect.height / 2 - H / 2;
+    const toX   = toRect.left   + toRect.width    / 2 - W / 2;
+    const toY   = toRect.top    + toRect.height   / 2 - H / 2;
+
+    const bubble = document.createElement("div");
+    bubble.className = `ask-bubble ${red ? "red" : "black"}`;
+    bubble.innerHTML = `<span class="abr">${rank}</span><span class="abs">${symbol}</span><span class="abc">${symbol}</span>`;
+    bubble.style.cssText = `
+      position: fixed;
+      left: ${fromX}px;
+      top: ${fromY}px;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 9995;
+      transition: opacity 0.25s ease;
+    `;
+    layer.appendChild(bubble);
+    bubbleEls.push({ el: bubble, assignedId, card });
+
+    // Phase 1: staggered launch — fade in, then travel to assigned holder.
+    const launchDelay = i * DECLARE_BUBBLE_STAGGER_MS;
+    setTimeout(() => {
+      rAF2(() => { bubble.style.opacity = "0.85"; });
       setTimeout(() => {
-        flyCard({ from: fromEl, to: dest, card: card as Card, duration: ANIM.DECLARE_CARD_FLIGHT_S }).then(resolve);
-      }, i * ANIM.DECLARE_STAGGER_MS);
-    });
-    flights.push(flight);
+        bubble.style.transition = `left ${effectiveDeclBubbleMs}ms linear, top ${effectiveDeclBubbleMs}ms linear`;
+        rAF2(() => {
+          bubble.style.left = `${toX}px`;
+          bubble.style.top  = `${toY}px`;
+        });
+      }, 250);
+    }, launchDelay);
   });
 
-  return Promise.all(flights).then(() => undefined);
+  // All bubbles arrive by effectiveDeclBubbleMs + fade-in lead + last stagger offset.
+  const allArrivedMs = effectiveDeclBubbleMs + 250 + (cards.length > 0 ? (cards.length - 1) * DECLARE_BUBBLE_STAGGER_MS : 0);
+
+  return new Promise<void>((resolve) => {
+    // Phase 2: immediately after all bubbles arrive, reveal simultaneously.
+    setTimeout(() => {
+      const center = getCenterEl();
+      const centerRect = center ? center.getBoundingClientRect() : null;
+      const revealPromises: Promise<void>[] = [];
+      const wrongEls: HTMLElement[] = [];
+
+      bubbleEls.forEach(({ el: bubble, assignedId, card }, i) => {
+        const isCorrect = assignedId === sources[card];
+
+        if (isCorrect) {
+          // Correct: dissolve bubble, fly solid card from actual holder to felt center.
+          bubble.style.transition = `opacity ${ANIM.BUBBLE_DISSOLVE_MS / 1000}s ease-in`;
+          rAF2(() => { bubble.style.opacity = "0"; });
+
+          const p = new Promise<void>((res) => {
+            setTimeout(() => {
+              bubble.remove();
+              if (!centerRect) { res(); return; }
+              const offsetX = (i - (bubbleEls.length - 1) / 2) * 18;
+              const dest = new DOMRect(
+                centerRect.left + offsetX,
+                centerRect.top - 18,
+                centerRect.width,
+                centerRect.height,
+              );
+              const sourceEl = getSeatEl(sources[card]);
+              if (!sourceEl) { res(); return; }
+              flyCard({
+                from: sourceEl,
+                to: dest,
+                card: card as Card,
+                duration: effectiveDeclReturnMs / 1000,
+              }).then(res);
+            }, ANIM.BUBBLE_DISSOLVE_MS);
+          });
+          revealPromises.push(p);
+        } else {
+          // Wrong: bubble turns red/dim; solid card pops in at actual holder then fades out.
+          bubble.style.transition = "opacity 0.2s ease, box-shadow 0.2s ease";
+          rAF2(() => {
+            bubble.style.opacity = "0.5";
+            bubble.style.boxShadow = "0 0 16px 4px rgba(220,50,50,0.7)";
+          });
+
+          const actualEl = getSeatEl(sources[card]);
+          if (actualEl) {
+            const actualRect = actualEl.getBoundingClientRect();
+            const { rank, symbol, red } = cardShort(card as Card);
+            const ind = document.createElement("div");
+            ind.className = `flying-card face ${red ? "red" : "black"}`;
+            ind.innerHTML =
+              `<span class="cr tl">${rank}</span><span class="cs tl">${symbol}</span>` +
+              `<span class="cc">${symbol}</span>` +
+              `<span class="cr br">${rank}</span><span class="cs br">${symbol}</span>`;
+            const ix = actualRect.left + actualRect.width  / 2 - 42;
+            const iy = actualRect.top  + actualRect.height / 2 - 60;
+            ind.style.cssText = `
+              position: fixed;
+              left: ${ix}px;
+              top: ${iy}px;
+              opacity: 0;
+              transform: scale(0);
+              pointer-events: none;
+              z-index: 9996;
+              transition: opacity ${DECLARE_WRONG_POP_MS / 1000}s ease-out,
+                          transform ${DECLARE_WRONG_POP_MS / 1000}s ease-out;
+            `;
+            layer.appendChild(ind);
+            wrongEls.push(ind);
+            rAF2(() => {
+              ind.style.opacity = "1";
+              ind.style.transform = "scale(1)";
+            });
+          }
+        }
+      });
+
+      // After all correct-card flights finish (or after effectiveDeclReturnMs for
+      // wrong-only declares), fade out wrong indicators and bubbles then resolve.
+      const allDoneP = revealPromises.length > 0
+        ? Promise.all(revealPromises)
+        : new Promise<void>((res) => setTimeout(res, effectiveDeclReturnMs));
+
+      allDoneP.then(() => {
+        bubbleEls.forEach(({ el: bubble, assignedId, card }) => {
+          if (assignedId !== sources[card]) {
+            bubble.style.transition = `opacity ${DECLARE_WRONG_FADE_MS / 1000}s ease-in`;
+            rAF2(() => { bubble.style.opacity = "0"; });
+            setTimeout(() => bubble.remove(), DECLARE_WRONG_FADE_MS + 50);
+          }
+        });
+        wrongEls.forEach((ind) => {
+          ind.style.transition = `opacity ${DECLARE_WRONG_FADE_MS / 1000}s ease-in`;
+          rAF2(() => { ind.style.opacity = "0"; });
+          setTimeout(() => ind.remove(), DECLARE_WRONG_FADE_MS + 50);
+        });
+        setTimeout(resolve, DECLARE_WRONG_FADE_MS + 100);
+      });
+    }, allArrivedMs);
+  });
 }
 
 // ── Declare card-flight ──────────────────────────────────────────────────────

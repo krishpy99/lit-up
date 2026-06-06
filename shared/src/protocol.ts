@@ -134,7 +134,7 @@ export function isIllustration(character: string): boolean {
 }
 
 export const DECLARE_BUBBLE_MS = 1000;  // outbound bubble travel
-export const DECLARE_RETURN_MS = 1000;  // reveal / return phase
+export const DECLARE_RETURN_MS = 2000;  // reveal / return phase
 
 export const MIN_PLAYERS = 4;
 export const MAX_PLAYERS = 10;

@@ -20,7 +20,7 @@
  */
 
 import { animate } from "motion";
-import { cardShort, handSortKey, DECLARE_RETURN_MS, type Card } from "@lit-up/shared";
+import { cardShort, handSortKey, DECLARE_BUBBLE_MS, DECLARE_RETURN_MS, type Card } from "@lit-up/shared";
 
 // ── Animation timing constants ────────────────────────────────────────────────
 // All values are in milliseconds unless otherwise noted.
@@ -305,7 +305,7 @@ function spawnReturnCard(
 const effectiveDeclReturnMs = Number(import.meta.env.VITE_DECLARE_RETURN_MS) || DECLARE_RETURN_MS;
 
 // Internal declare timing constants (all ms).
-const OUTBOUND_MS     = 600;       // Phase 1: bubble travel speed
+const OUTBOUND_MS     = Number(import.meta.env.VITE_DECLARE_BUBBLE_MS) || DECLARE_BUBBLE_MS;
 const STAGGER_MS      = 50;        // Phase 1: between bubble launches (global order)
 const REVEAL_DURATION = 1000;      // Phase 2: opacity transition for correct bubbles
 const REVEAL_OVERLAP  = 500;       // Phase 2: next card starts this many ms after previous
@@ -459,59 +459,59 @@ export function animateDeclare(
         const revealDelay = revealIdx * REVEAL_OVERLAP;
 
         if (isCorrect) {
-          setTimeout(() => {
-            // Animate opacity 0.35 → 1 via CSS transition.
-            bubble.style.transition = `opacity ${REVEAL_DURATION}ms ease`;
-            rAF2(() => { bubble.style.opacity = "1"; });
+          const p = new Promise<void>((res) => {
+            setTimeout(() => {
+              // Fade out the translucent bubble, spawn a solid flying-card.face
+              // (identical to the ask return-card mechanic) and slide it to center.
+              bubble.style.transition = `opacity 200ms ease-in`;
+              rAF2(() => { bubble.style.opacity = "0"; });
+              setTimeout(() => bubble.remove(), 210);
 
-            // After reveal completes: slide the existing bubble to center (same CSS
-            // left/top technique as spawnReturnCard — no Motion pop-in/pop-out).
-            const p = new Promise<void>((res) => {
+              if (!centerRect) { res(); return; }
+              const { rank, symbol, red } = cardShort(card as Card);
+              const fromX = parseFloat(bubble.style.left);
+              const fromY = parseFloat(bubble.style.top);
+              const offsetX = (revealIdx - (bubbles.length - 1) / 2) * (84 + 4);
+              const toX = centerRect.left + centerRect.width  / 2 - 42 + offsetX;
+              const toY = centerRect.top  + centerRect.height / 2 - 60;
+
+              const solid = document.createElement("div");
+              solid.className = `flying-card face ${red ? "red" : "black"}`;
+              solid.innerHTML = `<span class="cr tl">${rank}</span><span class="cs tl">${symbol}</span><span class="cc">${symbol}</span><span class="cr br">${rank}</span><span class="cs br">${symbol}</span>`;
+              solid.style.cssText = `position:fixed;left:${fromX}px;top:${fromY}px;opacity:0;pointer-events:none;z-index:9996;transition:opacity 200ms ease;`;
+              layer.appendChild(solid);
+              rAF2(() => { solid.style.opacity = "1"; });
+
               setTimeout(() => {
-                if (!centerRect) { bubble.remove(); res(); return; }
-                const offsetX = (revealIdx - (bubbles.length - 1) / 2) * (SCALED_W + 4);
-                const toX = centerRect.left + centerRect.width  / 2 - SCALED_W / 2 + offsetX;
-                const toY = centerRect.top  + centerRect.height / 2 - SCALED_H / 2;
-                bubble.style.transition = `left ${effectiveDeclReturnMs}ms linear, top ${effectiveDeclReturnMs}ms linear`;
-                rAF2(() => {
-                  bubble.style.left = `${toX}px`;
-                  bubble.style.top  = `${toY}px`;
-                });
+                solid.style.transition = `left ${effectiveDeclReturnMs}ms linear, top ${effectiveDeclReturnMs}ms linear`;
+                rAF2(() => { solid.style.left = `${toX}px`; solid.style.top = `${toY}px`; });
                 setTimeout(() => {
-                  bubble.style.transition = `opacity 250ms ease-in`;
-                  rAF2(() => { bubble.style.opacity = "0"; });
-                  setTimeout(() => { bubble.remove(); res(); }, 260);
+                  solid.style.transition = `opacity 250ms ease-in`;
+                  rAF2(() => { solid.style.opacity = "0"; });
+                  setTimeout(() => { solid.remove(); res(); }, 260);
                 }, effectiveDeclReturnMs);
-              }, REVEAL_DURATION);
-            });
-            flyCardPromises.push(p);
-          }, revealDelay);
+              }, 220);
+            }, revealDelay);
+          });
+          flyCardPromises.push(p);
         } else {
-          // Wrong: keep bubble at opacity 0.35, spawn solid indicator at actual holder's seat.
+          // Wrong: bubble stays translucent at wrong seat; solid flying-card.face
+          // appears at the actual holder so it's immediately obvious where it really was.
           let indicator: HTMLElement | null = null;
           setTimeout(() => {
             const actualEl = getSeatEl(sources[card]);
             if (actualEl) {
               const actualRect = actualEl.getBoundingClientRect();
               const { rank, symbol, red } = cardShort(card as Card);
-              const indX = actualRect.left + actualRect.width / 2 - SCALED_W / 2;
-              const indY = actualRect.top - SCALED_H - 8;
+              const indX = actualRect.left + actualRect.width / 2 - 42;
+              const indY = actualRect.top - 120 - 8;
 
               indicator = document.createElement("div");
-              indicator.className = `ask-bubble ${red ? "red" : "black"}`;
-              indicator.innerHTML = `<span class="abr">${rank}</span><span class="abs">${symbol}</span><span class="abc">${symbol}</span>`;
-              indicator.style.cssText = `
-                position: fixed;
-                left: ${indX}px;
-                top: ${indY}px;
-                opacity: 1;
-                transform: scale(0);
-                pointer-events: none;
-                z-index: 9996;
-                transition: transform ${DECLARE_POP_MS}ms ease-out;
-              `;
+              indicator.className = `flying-card face ${red ? "red" : "black"}`;
+              indicator.innerHTML = `<span class="cr tl">${rank}</span><span class="cs tl">${symbol}</span><span class="cc">${symbol}</span><span class="cr br">${rank}</span><span class="cs br">${symbol}</span>`;
+              indicator.style.cssText = `position:fixed;left:${indX}px;top:${indY}px;opacity:0;pointer-events:none;z-index:9996;transition:opacity ${DECLARE_POP_MS}ms ease;`;
               layer.appendChild(indicator);
-              rAF2(() => { indicator!.style.transform = "scale(0.7)"; });
+              rAF2(() => { indicator!.style.opacity = "1"; });
             }
             wrongEntries.push({ bubble, indicator });
           }, revealDelay);

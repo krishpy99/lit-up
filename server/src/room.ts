@@ -41,7 +41,10 @@ import {
 import { buildBotDeclareAssignments, decideBotAction } from "./bot.js";
 
 const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const RECONNECT_GRACE_S = 300; // 5 minutes
+const RECONNECT_GRACE_S = Number(process.env.LIT_RECONNECT_GRACE_S ?? 300) || 300; // 5 minutes
+
+const effectiveBotThinkMs = Number(process.env.LIT_BOT_THINK_MS ?? BOT_THINK_MS) || BOT_THINK_MS;
+const effectivePostBotActionDelayMs = Number(process.env.LIT_POST_BOT_ACTION_DELAY_MS ?? POST_BOT_ACTION_DELAY_MS) || POST_BOT_ACTION_DELAY_MS;
 
 // Single-word movie-inspired bot names
 const BOT_NAMES = [
@@ -514,7 +517,7 @@ export class LiteratureRoom extends Room<GameState> {
     const cur = this.state.players.get(this.state.turnId);
     if (!cur || !cur.isBot) return;
 
-    const delay = postAction ? POST_BOT_ACTION_DELAY_MS : BOT_THINK_MS;
+    const delay = postAction ? effectivePostBotActionDelayMs : effectiveBotThinkMs;
     this.botTimer = setTimeout(() => this.runBotTurn(), delay);
   }
 

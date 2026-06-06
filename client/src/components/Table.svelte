@@ -67,10 +67,12 @@
 
   {#if room.status === "ended"}
     <div class="felt-over-banner">
-      <div class="winner">
-        {room.winnerTeam ? `Team ${room.winnerTeam} wins! 🎉` : "Game tied"}
+      <div class="over-top">
+        <div class="winner">
+          {room.winnerTeam ? `Team ${room.winnerTeam} wins!` : "Game tied"}
+        </div>
+        <div class="sub">{room.scoreA} – {room.scoreB}</div>
       </div>
-      <div class="sub">{room.scoreA} – {room.scoreB}</div>
       <div class="over-actions">
         {#if game.isHost}
           <button class="btn btn-primary btn-sm" onclick={() => game.resetGame()}>

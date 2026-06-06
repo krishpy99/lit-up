@@ -264,11 +264,11 @@ export function applyAsk(
     // Target no longer holds the card; asker now does.
     recordFailure(ck, card, toPlayerId);
     recordSuccess(ck, card, askerId); // sets holder = asker, clears asker from absent
-    pushAction(state, `${asker.name} asked ${target.name} for ${cardLabel(card)} — got it.`);
+    pushAction(state, `${asker.name} → ${target.name} for ${cardLabel(card)} ✓`);
     state.turnId = askerId;
   } else {
     recordFailure(ck, card, toPlayerId);
-    pushAction(state, `${asker.name} asked ${target.name} for ${cardLabel(card)} — no luck.`);
+    pushAction(state, `${asker.name} → ${target.name} for ${cardLabel(card)} ✗`);
     state.turnId = toPlayerId;
   }
 

@@ -9,8 +9,8 @@ export function setLabel(key: SetKey): string {
 }
 
 export function classifyAction(text: string): string {
-  if (text.includes("got it")) return "txn-success";
-  if (text.includes("no luck")) return "txn-fail";
+  if (text.includes("✓")) return "txn-success";
+  if (text.includes("✗")) return "txn-fail";
   if (text.includes("declared") || text.includes("missed declaring") || text.includes("wins")) return "txn-declare";
   if (text.includes("passed")) return "txn-pass";
   return "txn-info";

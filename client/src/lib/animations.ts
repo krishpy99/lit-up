@@ -20,7 +20,7 @@
  */
 
 import { animate } from "motion";
-import { cardShort, DECLARE_BUBBLE_MS, DECLARE_RETURN_MS, type Card } from "@lit-up/shared";
+import { cardShort, handSortKey, DECLARE_RETURN_MS, type Card } from "@lit-up/shared";
 
 // ── Animation timing constants ────────────────────────────────────────────────
 // All values are in milliseconds unless otherwise noted.
@@ -302,23 +302,28 @@ function spawnReturnCard(
 // ── Declare animation ────────────────────────────────────────────────────────
 
 // Env-var overrides (baked in at build time via Vite).
-const effectiveDeclBubbleMs = Number(import.meta.env.VITE_DECLARE_BUBBLE_MS) || DECLARE_BUBBLE_MS;
 const effectiveDeclReturnMs = Number(import.meta.env.VITE_DECLARE_RETURN_MS) || DECLARE_RETURN_MS;
 
 // Internal declare timing constants (all ms).
-const DECLARE_BUBBLE_STAGGER_MS = 80;  // stagger between outbound bubble launches
-const DECLARE_WRONG_POP_MS      = 300; // scale-in pop for wrong-position indicator
-const DECLARE_WRONG_FADE_MS     = 300; // fade-out for wrong indicators
+const DECLARE_FLY_MS         = 500;  // Phase 1: bubble travel duration
+const DECLARE_STAGGER_MS_PH1 = 60;   // Phase 1: stagger between bubble launches
+const DECLARE_REVEAL_GAP_MS  = 500;  // Phase 2: ms between each card's reveal start
+const DECLARE_DISSOLVE_MS    = 400;  // Phase 2: opacity transition for correct bubble
+const DECLARE_PAUSE_MS       = 300;  // Phase 2: pause after dissolve before flyCard
+const DECLARE_POP_MS         = 300;  // Phase 2: scale-in pop for wrong card
+const DECLARE_WIGGLE_MS      = 400;  // Phase 3: wiggle duration for wrong bubbles
+const DECLARE_FADE_MS        = 300;  // Phase 3: fade-out for wrong bubbles
 
 /**
- * 2-phase declare animation:
- *   Phase 1 — Outbound bubbles launch from declarer → each assigned holder,
- *              all simultaneously with ~80 ms stagger, arriving at effectiveDeclBubbleMs.
- *   Phase 2 — Immediately on arrival: correct → bubble dissolves, solid card flies
- *              from actual holder to felt center; wrong → bubble turns red/dim,
- *              solid card pops in at actual holder then fades out.
+ * 3-phase declare animation:
+ *   Phase 1 — All 6 bubbles fly from declarer to their assigned seats (~0.5s,
+ *              60ms stagger) and park there.
+ *   Phase 2 — Sequential reveal, lowest → highest rank, 500ms apart:
+ *              correct → bubble goes solid, then flyCard to center (not awaited);
+ *              wrong   → bubble dims (opacity → 0.2), solid card pops at actual seat.
+ *   Phase 3 — After all reveals, wrong bubbles wiggle then fade out.
  *
- * Promise resolves when all reveal animations complete.
+ * Promise resolves after Phase 3 completes.
  */
 export function animateDeclare(
   declarerId: string,
@@ -335,7 +340,8 @@ export function animateDeclare(
   const cards = Object.keys(sources);
   const W = 84, H = 120;
 
-  // Spawn one outbound bubble per card — all launch simultaneously with small stagger.
+  // ── Phase 1: fly all bubbles to assigned seats ──────────────────────────
+
   const bubbleEls: { el: HTMLElement; assignedId: string; card: string }[] = [];
 
   cards.forEach((card, i) => {
@@ -356,56 +362,61 @@ export function animateDeclare(
     const bubble = document.createElement("div");
     bubble.className = `ask-bubble ${red ? "red" : "black"}`;
     bubble.innerHTML = `<span class="abr">${rank}</span><span class="abs">${symbol}</span><span class="abc">${symbol}</span>`;
+    // Scale down to ~70% via inline transform.
     bubble.style.cssText = `
       position: fixed;
       left: ${fromX}px;
       top: ${fromY}px;
-      opacity: 0;
+      opacity: 0.35;
+      transform: scale(0.7);
       pointer-events: none;
       z-index: 9995;
-      transition: opacity 0.25s ease;
     `;
     layer.appendChild(bubble);
     bubbleEls.push({ el: bubble, assignedId, card });
 
-    // Phase 1: staggered launch — fade in, then travel to assigned holder.
-    const launchDelay = i * DECLARE_BUBBLE_STAGGER_MS;
+    // Staggered launch: set up CSS transition then move after a rAF.
+    const launchDelay = i * DECLARE_STAGGER_MS_PH1;
     setTimeout(() => {
-      rAF2(() => { bubble.style.opacity = "0.85"; });
-      setTimeout(() => {
-        bubble.style.transition = `left ${effectiveDeclBubbleMs}ms linear, top ${effectiveDeclBubbleMs}ms linear`;
-        rAF2(() => {
-          bubble.style.left = `${toX}px`;
-          bubble.style.top  = `${toY}px`;
-        });
-      }, 250);
+      bubble.style.transition = `left ${DECLARE_FLY_MS}ms linear, top ${DECLARE_FLY_MS}ms linear`;
+      rAF2(() => {
+        bubble.style.left = `${toX}px`;
+        bubble.style.top  = `${toY}px`;
+      });
     }, launchDelay);
   });
 
-  // All bubbles arrive by effectiveDeclBubbleMs + fade-in lead + last stagger offset.
-  const allArrivedMs = effectiveDeclBubbleMs + 250 + (cards.length > 0 ? (cards.length - 1) * DECLARE_BUBBLE_STAGGER_MS : 0);
+  // All bubbles have landed once the last one finishes travel.
+  const allLandedMs = DECLARE_FLY_MS + (cards.length > 0 ? (cards.length - 1) * DECLARE_STAGGER_MS_PH1 : 0);
 
   return new Promise<void>((resolve) => {
-    // Phase 2: immediately after all bubbles arrive, reveal simultaneously.
+    // ── Phase 2: sequential reveal, ordered by card rank ─────────────────
+
     setTimeout(() => {
       const center = getCenterEl();
       const centerRect = center ? center.getBoundingClientRect() : null;
-      const revealPromises: Promise<void>[] = [];
-      const wrongEls: HTMLElement[] = [];
 
-      bubbleEls.forEach(({ el: bubble, assignedId, card }, i) => {
+      // Sort cards lowest → highest by hand sort key.
+      const sortedBubbles = [...bubbleEls].sort(
+        (a, b) => handSortKey(a.card as Card) - handSortKey(b.card as Card),
+      );
+
+      const wrongBubbleEls: HTMLElement[] = [];
+
+      sortedBubbles.forEach(({ el: bubble, assignedId, card }, revealIdx) => {
+        const revealDelay = revealIdx * DECLARE_REVEAL_GAP_MS;
         const isCorrect = assignedId === sources[card];
 
         if (isCorrect) {
-          // Correct: dissolve bubble, fly solid card from actual holder to felt center.
-          bubble.style.transition = `opacity ${ANIM.BUBBLE_DISSOLVE_MS / 1000}s ease-in`;
-          rAF2(() => { bubble.style.opacity = "0"; });
+          // Correct: opacity 0.35 → 1 over 0.4s, then flyCard (not awaited).
+          setTimeout(() => {
+            bubble.style.transition = `opacity ${DECLARE_DISSOLVE_MS}ms ease`;
+            rAF2(() => { bubble.style.opacity = "1"; });
 
-          const p = new Promise<void>((res) => {
             setTimeout(() => {
               bubble.remove();
-              if (!centerRect) { res(); return; }
-              const offsetX = (i - (bubbleEls.length - 1) / 2) * 18;
+              if (!centerRect) return;
+              const offsetX = (revealIdx - (sortedBubbles.length - 1) / 2) * 18;
               const dest = new DOMRect(
                 centerRect.left + offsetX,
                 centerRect.top - 18,
@@ -413,79 +424,90 @@ export function animateDeclare(
                 centerRect.height,
               );
               const sourceEl = getSeatEl(sources[card]);
-              if (!sourceEl) { res(); return; }
+              if (!sourceEl) return;
+              // Fire-and-forget — runs concurrently with subsequent reveals.
               flyCard({
                 from: sourceEl,
                 to: dest,
                 card: card as Card,
                 duration: effectiveDeclReturnMs / 1000,
-              }).then(res);
-            }, ANIM.BUBBLE_DISSOLVE_MS);
-          });
-          revealPromises.push(p);
+              });
+            }, DECLARE_DISSOLVE_MS + DECLARE_PAUSE_MS);
+          }, revealDelay);
         } else {
-          // Wrong: bubble turns red/dim; solid card pops in at actual holder then fades out.
-          bubble.style.transition = "opacity 0.2s ease, box-shadow 0.2s ease";
-          rAF2(() => {
-            bubble.style.opacity = "0.5";
-            bubble.style.boxShadow = "0 0 16px 4px rgba(220,50,50,0.7)";
-          });
+          // Wrong: dim the misplaced bubble; pop in a solid card at the actual seat.
+          setTimeout(() => {
+            bubble.style.transition = "opacity 0.2s ease";
+            rAF2(() => { bubble.style.opacity = "0.2"; });
 
-          const actualEl = getSeatEl(sources[card]);
-          if (actualEl) {
-            const actualRect = actualEl.getBoundingClientRect();
-            const { rank, symbol, red } = cardShort(card as Card);
-            const ind = document.createElement("div");
-            ind.className = `flying-card face ${red ? "red" : "black"}`;
-            ind.innerHTML =
-              `<span class="cr tl">${rank}</span><span class="cs tl">${symbol}</span>` +
-              `<span class="cc">${symbol}</span>` +
-              `<span class="cr br">${rank}</span><span class="cs br">${symbol}</span>`;
-            const ix = actualRect.left + actualRect.width  / 2 - 42;
-            const iy = actualRect.top  + actualRect.height / 2 - 60;
-            ind.style.cssText = `
-              position: fixed;
-              left: ${ix}px;
-              top: ${iy}px;
-              opacity: 0;
-              transform: scale(0);
-              pointer-events: none;
-              z-index: 9996;
-              transition: opacity ${DECLARE_WRONG_POP_MS / 1000}s ease-out,
-                          transform ${DECLARE_WRONG_POP_MS / 1000}s ease-out;
-            `;
-            layer.appendChild(ind);
-            wrongEls.push(ind);
-            rAF2(() => {
-              ind.style.opacity = "1";
-              ind.style.transform = "scale(1)";
-            });
-          }
+            const actualEl = getSeatEl(sources[card]);
+            if (actualEl) {
+              const actualRect = actualEl.getBoundingClientRect();
+              const { rank, symbol, red } = cardShort(card as Card);
+              const ind = document.createElement("div");
+              ind.className = `flying-card face ${red ? "red" : "black"}`;
+              ind.innerHTML =
+                `<span class="cr tl">${rank}</span><span class="cs tl">${symbol}</span>` +
+                `<span class="cc">${symbol}</span>` +
+                `<span class="cr br">${rank}</span><span class="cs br">${symbol}</span>`;
+              const ix = actualRect.left + actualRect.width  / 2 - 42;
+              const iy = actualRect.top  + actualRect.height / 2 - 60;
+              ind.style.cssText = `
+                position: fixed;
+                left: ${ix}px;
+                top: ${iy}px;
+                opacity: 1;
+                transform: scale(0);
+                pointer-events: none;
+                z-index: 9996;
+                transition: transform ${DECLARE_POP_MS}ms ease-out;
+              `;
+              layer.appendChild(ind);
+              rAF2(() => { ind.style.transform = "scale(1)"; });
+            }
+
+            wrongBubbleEls.push(bubble);
+          }, revealDelay);
         }
       });
 
-      // After all correct-card flights finish (or after effectiveDeclReturnMs for
-      // wrong-only declares), fade out wrong indicators and bubbles then resolve.
-      const allDoneP = revealPromises.length > 0
-        ? Promise.all(revealPromises)
-        : new Promise<void>((res) => setTimeout(res, effectiveDeclReturnMs));
+      // ── Phase 3: wiggle wrong bubbles then fade everything out ──────────
 
-      allDoneP.then(() => {
-        bubbleEls.forEach(({ el: bubble, assignedId, card }) => {
-          if (assignedId !== sources[card]) {
-            bubble.style.transition = `opacity ${DECLARE_WRONG_FADE_MS / 1000}s ease-in`;
-            rAF2(() => { bubble.style.opacity = "0"; });
-            setTimeout(() => bubble.remove(), DECLARE_WRONG_FADE_MS + 50);
+      const allRevealsMs = sortedBubbles.length > 0
+        ? (sortedBubbles.length - 1) * DECLARE_REVEAL_GAP_MS + DECLARE_DISSOLVE_MS
+        : 0;
+
+      setTimeout(() => {
+        wrongBubbleEls.forEach((bubble) => {
+          // CSS keyframe wiggle via class — add a keyframe rule dynamically.
+          const wiggleKeyframes = `
+            @keyframes declare-wrong-wiggle {
+              0%,100% { transform: scale(0.7) translateX(0); }
+              20%     { transform: scale(0.7) translateX(-6px); }
+              40%     { transform: scale(0.7) translateX(6px); }
+              60%     { transform: scale(0.7) translateX(-5px); }
+              80%     { transform: scale(0.7) translateX(5px); }
+            }
+          `;
+          if (!document.getElementById("declare-wiggle-style")) {
+            const style = document.createElement("style");
+            style.id = "declare-wiggle-style";
+            style.textContent = wiggleKeyframes;
+            document.head.appendChild(style);
           }
+          bubble.style.animation = `declare-wrong-wiggle ${DECLARE_WIGGLE_MS}ms ease`;
+
+          setTimeout(() => {
+            bubble.style.animation = "";
+            bubble.style.transition = `opacity ${DECLARE_FADE_MS}ms ease-in`;
+            rAF2(() => { bubble.style.opacity = "0"; });
+            setTimeout(() => bubble.remove(), DECLARE_FADE_MS + 50);
+          }, DECLARE_WIGGLE_MS);
         });
-        wrongEls.forEach((ind) => {
-          ind.style.transition = `opacity ${DECLARE_WRONG_FADE_MS / 1000}s ease-in`;
-          rAF2(() => { ind.style.opacity = "0"; });
-          setTimeout(() => ind.remove(), DECLARE_WRONG_FADE_MS + 50);
-        });
-        setTimeout(resolve, DECLARE_WRONG_FADE_MS + 100);
-      });
-    }, allArrivedMs);
+
+        setTimeout(resolve, DECLARE_WIGGLE_MS + DECLARE_FADE_MS + 100);
+      }, allRevealsMs);
+    }, allLandedMs);
   });
 }
 

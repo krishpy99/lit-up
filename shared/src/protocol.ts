@@ -133,6 +133,9 @@ export function isIllustration(character: string): boolean {
   return character.startsWith("art:");
 }
 
+export const DECLARE_BUBBLE_MS = 1000;  // outbound bubble travel
+export const DECLARE_RETURN_MS = 1000;  // reveal / return phase
+
 export const MIN_PLAYERS = 4;
 export const MAX_PLAYERS = 10;
 export const SETS_TO_WIN = 5;

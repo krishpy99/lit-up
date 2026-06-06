@@ -207,11 +207,36 @@ export class LiteratureRoom extends Room<GameState> {
     if (!player) return;
 
     // In lobby, leaving is permanent and team is reshuffled.
-    if (this.state.status === "lobby" || consented) {
+    if (this.state.status === "lobby") {
       this.removePlayer(playerId);
       pushAction(this.state, `${player.name} left.`);
       this.maybePromoteHost();
       assignTeams(this.state);
+      return;
+    }
+
+    // Mid-game consented leave: remove the player and spawn a replacement bot.
+    if (consented) {
+      const botId = `bot-${Math.random().toString(36).slice(2, 9)}`;
+      const bot = new Player();
+      bot.id = botId;
+      bot.name = getNextBotName(this.state);
+      bot.avatar = player.avatar;
+      bot.character = player.character;
+      bot.team = player.team;
+      bot.isBot = true;
+      bot.isHost = false;
+      bot.connected = true;
+      bot.cardCount = player.cardCount;
+
+      this.state.players.set(botId, bot);
+      this.hands.set(botId, [...this.hands.get(playerId) ?? []]);
+      this.removePlayer(playerId);
+
+      pushAction(this.state, `${player.name} left. A bot is taking over.`);
+      this.maybePromoteHost();
+      ensureValidTurn(this.state, this.hands);
+      this.scheduleBot();
       return;
     }
 

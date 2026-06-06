@@ -139,5 +139,5 @@ export const SETS_TO_WIN = 5;
 export const PENDING_BOT_ASK_MS = 0; // no longer used — ask fires immediately after think
 export const BOT_THINK_MS = 2200;  // 2.2 s silent think before executing
 /** Delay between resolving a bot action and scheduling the next bot think.
- *  Must be >= the longest ask animation (~7.85 s for a successful ask). */
-export const POST_BOT_ACTION_DELAY_MS = 8000;
+ *  Must be >= the longest ask animation (400 + 1500 + 350 + 400 + 2000 + 400 = 5050 ms for a successful ask, ~5.05 s). */
+export const POST_BOT_ACTION_DELAY_MS = 5500;

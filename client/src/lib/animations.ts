@@ -33,7 +33,7 @@ export const ANIM = {
   BUBBLE_PRE_TRAVEL_MS: 400,
   // Travel duration for the outgoing ask bubble (asker → target).
   // Must be exactly RETURN_TRAVEL_MS - 500 per design spec.
-  BUBBLE_TRAVEL_MS: 3500,
+  BUBBLE_TRAVEL_MS: 1500,
   // How long the bubble takes to dissolve on a successful ask.
   BUBBLE_DISSOLVE_MS: 300,
   // How long the burst animation plays on a failed ask (scale + fade).
@@ -47,7 +47,7 @@ export const ANIM = {
   RETURN_PRE_TRAVEL_MS: 400,
   // Travel duration for the return card (target → asker).
   // Bubble travel = RETURN_TRAVEL_MS - 500, so the bubble is 500 ms faster.
-  RETURN_TRAVEL_MS: 4000,
+  RETURN_TRAVEL_MS: 2000,
   // Fade out duration as the return card lands at the asker.
   RETURN_FADE_OUT_MS: 350,
   // Extra pause after fade-out completes before the promise resolves.
@@ -375,9 +375,9 @@ export function flyCard(opts: CardFlightOpts): Promise<void> {
 
   Object.assign(el.style, {
     position: "fixed",
-    left: "0px",
-    top: "0px",
-    transform: `translate(${startX}px, ${startY}px) scale(0.6) rotate(-8deg)`,
+    left: `${startX}px`,
+    top: `${startY}px`,
+    transform: `scale(0.6) rotate(-8deg)`,
     opacity: "0",
     pointerEvents: "none",
     zIndex: "9995",
@@ -397,7 +397,7 @@ export function flyCard(opts: CardFlightOpts): Promise<void> {
       Promise.resolve(
         animate(
           el,
-          { x: [startX, endX], y: [startY, endY], scale: [1.1, 0.95], rotate: [-2, 6] },
+          { x: [0, endX - startX], y: [0, endY - startY], scale: [1.1, 0.95], rotate: [-2, 6] },
           { duration: fly, ease: [0.25, 0.46, 0.45, 0.94] },
         ),
       ).then(() => {

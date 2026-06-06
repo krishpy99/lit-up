@@ -93,6 +93,7 @@
       <span>Action log</span>
       <button class="log-close" onclick={toggle} aria-label="Close log">×</button>
     </header>
+    {#if room.actions.length > 10}
     <div class="log-filter-strip">
       <!-- Level 1: All + suit chips + Joker -->
       <button
@@ -128,6 +129,7 @@
         >Major</button>
       {/if}
     </div>
+    {/if}
     <div class="log-list">
       {#if room.pendingBotAsk && pendingAsker && pendingTarget && pendingInfo}
         <div class="log-pending">

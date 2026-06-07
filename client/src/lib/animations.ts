@@ -324,9 +324,9 @@ const DECLARE_FADE_MS = 300;       // Phase 3: fade-out for wrong bubbles/indica
  *     when multiple cards go to the same player.
  *
  *   Phase 2 (sequential, REVEAL_OVERLAP apart) — Sorted globally by handSortKey:
- *     correct → opacity 0.35 → 1 over REVEAL_DURATION, then remove bubble and
- *               fire flyCard concurrently from actual holder to felt center.
- *     wrong   → stays at opacity 0.35; a solid indicator card pops in above
+ *     correct → bubble fades out (opacity → 0), then a solid flying-card flies
+ *               from actual holder to felt center.
+ *     wrong   → bubble stays visible with .claim styling; a solid indicator card pops in above
  *               the actual holder's seat (scale 0 → 0.7 over DECLARE_POP_MS).
  *
  *   Phase 3 (after all reveals have started) — Simultaneously shake+fade wrong
@@ -421,13 +421,14 @@ export function animateDeclare(
     const fromY = declCenterY - SCALED_H / 2;
 
     const bubble = document.createElement("div");
-    bubble.className = `ask-bubble ${red ? "red" : "black"}`;
+    // "claim" class uses a dimmed background (not opacity) so the text stays
+    // fully legible while the bubble still reads as an unverified assignment.
+    bubble.className = `ask-bubble claim ${red ? "red" : "black"}`;
     bubble.innerHTML = `<span class="abr">${rank}</span><span class="abs">${symbol}</span><span class="abc">${symbol}</span>`;
     bubble.style.cssText = `
       position: fixed;
       left: ${fromX}px;
       top: ${fromY}px;
-      opacity: 0.35;
       transform: scale(0.7);
       pointer-events: none;
       z-index: 9995;

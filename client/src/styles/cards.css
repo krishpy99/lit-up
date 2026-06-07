@@ -171,17 +171,33 @@
 /*
  * Ghost card: same proportions as a real card but translucent/frosted,
  * so it reads as "a question" rather than a confirmed transaction.
+ *
+ * --bubble-opacity controls the overall opacity of the ask bubble and can be
+ * overridden to tune the animation feel (default 1 = fully opaque outline).
+ * Note: avoid setting opacity on the element itself if you need readable text
+ * inside — prefer adjusting the background-color alpha instead.
  */
 .ask-bubble {
   position: fixed;
   width: 84px;
   height: 120px;
   border-radius: 9px;
-  background: rgba(240, 248, 255, 0.18);
+  background: rgba(240, 248, 255, var(--bubble-bg-alpha, 0.18));
   backdrop-filter: blur(10px);
   border: 2px solid rgba(255, 255, 255, 0.45);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.25);
   pointer-events: none;
+}
+
+/*
+ * Declare-phase claim bubble: uses a dimmed background to signal
+ * "unverified assignment" while keeping text fully legible.
+ * The opacity is kept at 1 (element level) so child text is not
+ * affected — only the background is dialled back.
+ */
+.ask-bubble.claim {
+  background: rgba(240, 248, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.22);
 }
 
 .ask-bubble.red {

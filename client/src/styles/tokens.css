@@ -56,6 +56,11 @@
   --ease-spring:    cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-in-out:    cubic-bezier(0.65, 0, 0.35, 1);
 
+  /* Animation appearance */
+  /* Background alpha for ask/declare bubble cards. Lower = more translucent.
+     Set to a higher value (e.g. 0.45) if the ghost cards are hard to read. */
+  --bubble-bg-alpha: 0.22;
+
   /* Shadows */
   --shadow-soft:    0 4px 20px rgba(0, 0, 0, 0.35);
   --shadow:         0 8px 32px rgba(0, 0, 0, 0.55);

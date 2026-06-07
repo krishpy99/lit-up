@@ -51,9 +51,18 @@
   let yourHasDeclarableSet = $derived.by(() => {
     if (!visibleRoom) return false;
     const claimed = new Set<SetKey>([...visibleRoom.claimedA, ...visibleRoom.claimedB]);
-    return SET_DEFS.some(
-      (s) => !claimed.has(s.key) && game.hand.some((c) => CARD_TO_SET.get(c) === s.key),
+    const myTeam = visibleRoom.players.find((p) => p.id === game.playerId)?.team;
+    if (!myTeam) return false;
+    // Show the Declare button when there is at least one unclaimed set and the
+    // player is on a team that has any cards (server validates whether the team
+    // holds a card in the chosen set). This allows declaring sets even when the
+    // declarer personally holds no card from them.
+    const hasUnclaimed = SET_DEFS.some((s) => !claimed.has(s.key));
+    if (!hasUnclaimed) return false;
+    const myTeamHasCards = visibleRoom.players.some(
+      (p) => p.team === myTeam && p.cardCount > 0,
     );
+    return myTeamHasCards;
   });
 
   function onTarget(p: PlayerSnapshot) {

@@ -27,37 +27,41 @@ import { cardShort, handSortKey, DECLARE_BUBBLE_MS, DECLARE_RETURN_MS, type Card
 // Edit here to tune the feel of the whole animation system.
 
 export const ANIM = {
-  // Ask bubble: fade in at asker's seat before starting travel.
-  BUBBLE_FADE_IN_MS:  350,
-  // Settle delay before the bubble starts moving (gives the fade-in time to finish).
-  BUBBLE_PRE_TRAVEL_MS: 400,
+  // Ask bubble: how long the bubble is visible at the asker's seat before travelling.
+  BUBBLE_PAUSE_AT_ASKER_MS: 500,
   // Travel duration for the outgoing ask bubble (asker → target).
-  // Must be exactly RETURN_TRAVEL_MS - 500 per design spec.
-  BUBBLE_TRAVEL_MS: 1500,
+  BUBBLE_TRAVEL_MS: 500,
+  // How long the bubble sits at the target's seat before burst/dissolve fires.
+  BUBBLE_PAUSE_AT_TARGET_MS: 500,
   // How long the bubble takes to dissolve on a successful ask.
   BUBBLE_DISSOLVE_MS: 300,
   // How long the burst animation plays on a failed ask (scale + fade).
   BUBBLE_BURST_MS: 500,
   // Pause between the bubble dissolving and the return card spawning.
-  BUBBLE_TO_RETURN_GAP_MS: 350,
+  BUBBLE_TO_RETURN_GAP_MS: 200,
 
-  // Return card: fade in at target seat before traveling back.
-  RETURN_FADE_IN_MS: 350,
-  // Settle delay before the return card starts moving.
-  RETURN_PRE_TRAVEL_MS: 400,
+  // Return card: how long the card is visible at the target's seat before travelling back.
+  RETURN_PAUSE_BEFORE_MS: 500,
   // Travel duration for the return card (target → asker).
-  // Bubble travel = RETURN_TRAVEL_MS - 500, so the bubble is 500 ms faster.
-  RETURN_TRAVEL_MS: 2000,
-  // Fade out duration as the return card lands at the asker.
-  RETURN_FADE_OUT_MS: 350,
-  // Extra pause after fade-out completes before the promise resolves.
-  RETURN_LAND_SETTLE_MS: 400,
+  RETURN_TRAVEL_MS: 1000,
+  // How long the card sits at the asker's seat before fading out.
+  RETURN_PAUSE_AFTER_MS: 500,
+  // Fade out duration as the return card disappears at the asker.
+  RETURN_FADE_OUT_MS: 250,
 
   // Declare card-flight stagger (ms between each card launching).
   DECLARE_STAGGER_MS: 110,
   // Total flight duration for a single declare card.
   DECLARE_CARD_FLIGHT_S: 1.5, // seconds, passed to Motion
 } as const;
+
+// Env-var overrides for ask/return timing (baked in at build time via Vite).
+const effectiveBubblePauseAtAskerMs   = Number(import.meta.env.VITE_BUBBLE_PAUSE_AT_ASKER_MS)   || ANIM.BUBBLE_PAUSE_AT_ASKER_MS;
+const effectiveBubbleTravelMs         = Number(import.meta.env.VITE_BUBBLE_TRAVEL_MS)            || ANIM.BUBBLE_TRAVEL_MS;
+const effectiveBubblePauseAtTargetMs  = Number(import.meta.env.VITE_BUBBLE_PAUSE_AT_TARGET_MS)  || ANIM.BUBBLE_PAUSE_AT_TARGET_MS;
+const effectiveReturnPauseBeforeMs    = Number(import.meta.env.VITE_RETURN_PAUSE_BEFORE_MS)      || ANIM.RETURN_PAUSE_BEFORE_MS;
+const effectiveReturnTravelMs         = Number(import.meta.env.VITE_RETURN_TRAVEL_MS)            || ANIM.RETURN_TRAVEL_MS;
+const effectiveReturnPauseAfterMs     = Number(import.meta.env.VITE_RETURN_PAUSE_AFTER_MS)       || ANIM.RETURN_PAUSE_AFTER_MS;
 
 const LAYER_ID = "card-flight-layer";
 
@@ -193,50 +197,53 @@ function runAskBubble(
     `;
     layer.appendChild(bubble);
 
-    // Phase 1: fade in
+    // Phase 1: fade in — bubble becomes visible at asker's seat
     rAF2(() => { bubble.style.opacity = "1"; });
 
-    // Phase 2: travel to target (straight line), starts after fade-in settles
+    // Phase 2: pause at asker, then travel to target
     setTimeout(() => {
-      bubble.style.transition = `left ${ANIM.BUBBLE_TRAVEL_MS}ms linear, top ${ANIM.BUBBLE_TRAVEL_MS}ms linear`;
+      bubble.style.transition = `left ${effectiveBubbleTravelMs}ms linear, top ${effectiveBubbleTravelMs}ms linear`;
       rAF2(() => {
         bubble.style.left = `${toX}px`;
         bubble.style.top  = `${toY}px`;
       });
 
-      // Phase 3: arrival — burst or dissolve + return card
+      // Phase 3: pause at target before revealing result
       setTimeout(() => {
         resolveArrived();
 
-        if (!opts.success) {
-          // Burst: scale up and fade out — result is now revealed (fail)
-          const burstS = ANIM.BUBBLE_BURST_MS / 1000;
-          bubble.style.transition = `transform ${burstS}s ease-out, opacity ${burstS}s ease-out`;
-          rAF2(() => {
-            bubble.style.transform = "scale(2.2)";
-            bubble.style.opacity   = "0";
-          });
-          setTimeout(() => {
-            bubble.remove();
-            resolveComplete();
-            resolveRun();
-          }, ANIM.BUBBLE_BURST_MS + 50);
-        } else {
-          // Dissolve, then send return card back to asker
-          const dissolveS = ANIM.BUBBLE_DISSOLVE_MS / 1000;
-          bubble.style.transition = `opacity ${dissolveS}s ease-in`;
-          rAF2(() => { bubble.style.opacity = "0"; });
-          setTimeout(() => {
-            bubble.remove();
-            spawnReturnCard(layer, fromRect, toRect, rank, symbol, red, () => {
-              // Card has arrived at asker — result is now revealed (success)
+        // Phase 4: pause at target, then burst or dissolve + return card
+        setTimeout(() => {
+          if (!opts.success) {
+            // Burst: scale up and fade out — result is now revealed (fail)
+            const burstS = ANIM.BUBBLE_BURST_MS / 1000;
+            bubble.style.transition = `transform ${burstS}s ease-out, opacity ${burstS}s ease-out`;
+            rAF2(() => {
+              bubble.style.transform = "scale(2.2)";
+              bubble.style.opacity   = "0";
+            });
+            setTimeout(() => {
+              bubble.remove();
               resolveComplete();
               resolveRun();
-            });
-          }, ANIM.BUBBLE_TO_RETURN_GAP_MS);
-        }
-      }, ANIM.BUBBLE_TRAVEL_MS);
-    }, ANIM.BUBBLE_PRE_TRAVEL_MS);
+            }, ANIM.BUBBLE_BURST_MS + 50);
+          } else {
+            // Dissolve, then send return card back to asker
+            const dissolveS = ANIM.BUBBLE_DISSOLVE_MS / 1000;
+            bubble.style.transition = `opacity ${dissolveS}s ease-in`;
+            rAF2(() => { bubble.style.opacity = "0"; });
+            setTimeout(() => {
+              bubble.remove();
+              spawnReturnCard(layer, fromRect, toRect, rank, symbol, red, () => {
+                // Card has arrived at asker — result is now revealed (success)
+                resolveComplete();
+                resolveRun();
+              });
+            }, ANIM.BUBBLE_TO_RETURN_GAP_MS);
+          }
+        }, effectiveBubblePauseAtTargetMs);
+      }, effectiveBubbleTravelMs);
+    }, effectiveBubblePauseAtAskerMs);
   });
 }
 
@@ -262,8 +269,7 @@ function spawnReturnCard(
     `<span class="cc">${symbol}</span>` +
     `<span class="cr br">${rank}</span><span class="cs br">${symbol}</span>`;
 
-  // Start at target seat, invisible
-  const fadeInS = ANIM.RETURN_FADE_IN_MS / 1000;
+  // Start at target seat, invisible — fade in for the pre-travel pause
   card.style.cssText = `
     position: fixed;
     left: ${cFromX}px;
@@ -271,32 +277,34 @@ function spawnReturnCard(
     opacity: 0;
     pointer-events: none;
     z-index: 9996;
-    transition: opacity ${fadeInS}s ease;
+    transition: opacity 0.2s ease;
   `;
   layer.appendChild(card);
 
-  // Fade in at target seat
+  // Phase 1: fade in — card becomes visible at target's seat (pause before travel)
   rAF2(() => { card.style.opacity = "1"; });
 
-  // Travel back to asker
+  // Phase 2: pause at target, then travel back to asker
   setTimeout(() => {
-    card.style.transition = `left ${ANIM.RETURN_TRAVEL_MS}ms linear, top ${ANIM.RETURN_TRAVEL_MS}ms linear`;
+    card.style.transition = `left ${effectiveReturnTravelMs}ms linear, top ${effectiveReturnTravelMs}ms linear`;
     rAF2(() => {
       card.style.left = `${cToX}px`;
       card.style.top  = `${cToY}px`;
     });
 
-    // Fade out on arrival, then notify caller
+    // Phase 3: pause at asker, then fade out
     setTimeout(() => {
-      const fadeOutS = ANIM.RETURN_FADE_OUT_MS / 1000;
-      card.style.transition = `opacity ${fadeOutS}s ease-in`;
-      rAF2(() => { card.style.opacity = "0"; });
       setTimeout(() => {
-        card.remove();
-        onDone();
-      }, ANIM.RETURN_LAND_SETTLE_MS);
-    }, ANIM.RETURN_TRAVEL_MS);
-  }, ANIM.RETURN_PRE_TRAVEL_MS);
+        const fadeOutS = ANIM.RETURN_FADE_OUT_MS / 1000;
+        card.style.transition = `opacity ${fadeOutS}s ease-in`;
+        rAF2(() => { card.style.opacity = "0"; });
+        setTimeout(() => {
+          card.remove();
+          onDone();
+        }, ANIM.RETURN_FADE_OUT_MS);
+      }, effectiveReturnPauseAfterMs);
+    }, effectiveReturnTravelMs);
+  }, effectiveReturnPauseBeforeMs);
 }
 
 // ── Declare animation ────────────────────────────────────────────────────────

@@ -36,33 +36,48 @@ non-self players, weighted by:
 
 ### 1.2 Set-level tracking
 
-Beyond individual cards the bot tracks two things per (player, set) pair:
+Beyond individual cards the bot maintains a **9 × N set-count table** — one row per
+set, one column per player. Each entry `table[S][P]` is the minimum number of cards
+player P is confirmed to hold in set S. This is the single structure that drives both
+set membership queries and declare readiness.
 
-**Set membership** — does this player hold at least one card in this set?
+**Three update rules, applied on every game event:**
 
-Established when a player asks for any card in set S: by the rules of Literature, you
-can only ask for a card in a set you already hold. One ask → confirmed member.
+| Event | Update |
+|---|---|
+| Player P asks for any card in set S | `table[S][P] = max(table[S][P], 1)` |
+| Player P receives a card in set S (successful ask transfer) | `table[S][P] += 1` |
+| Player P loses a card from set S (stripped by an opponent ask) | `table[S][P] = max(0, table[S][P] − 1)` |
 
-This is tracked with a confidence level:
+The ask rule is a *floor raise*, not a set — if P already has a confirmed count of 2,
+an ask doesn't reduce it. The strip rule is a decrement with a floor of 0.
 
-- **Hard confirm**: the player is definitely in this set (e.g. they asked directly,
-  or a successful ask transfer was witnessed).
-- **Soft confirm**: probabilistic — the player probably has a card there but the
-  signal could be deceptive (e.g. an echo ask or misdirection).
+**Why ask-ordering resolves naturally:**
 
-Which confidence level is assigned depends on who is signalling and the bot's own
-difficulty (see section 3.2).
+No explicit timestamp logic is needed. The table handles it:
+- Ask then strip: count goes 1 → 0 after strip → base is now uncertain.
+- Strip then ask: count decrements (possibly to 0) then ask raises floor back to 1 → base re-confirmed.
 
-**Set count estimate** — minimum number of cards this player holds in this set.
+**Deriving set membership from the table:**
 
-- Each confirmed card location (via successful ask or own hand) contributes +1.
-- Each time a player asks in a set, their minimum for that set is at least 1. If they
-  ask in the same set twice on separate turns (needing a base each time), their minimum
-  remains 1 unless a card was transferred to them in between.
-- Transfers (successful asks) directly increase the confirmed count.
+- `table[S][P] ≥ 1` → P definitely has a base in set S (p = 1).
+- `table[S][P] = 0` → uncertain; estimate the probability using remaining unknowns:
 
-This estimate is a lower bound. The actual count may be higher for cards that have never
-been mentioned in any ask.
+```
+P(P has ≥1 card in set S) = 1 − C(R − u, h) / C(R, h)
+```
+
+where `u` = cards in set S with no confirmed location, `R` = total unconfirmed cards
+across all players, `h` = P's current hand size. This replaces the old hard/soft confirm
+distinction for set membership — the table value is the ground truth; the formula
+produces a probability only when the table entry is 0.
+
+The confidence levels (hard/soft confirm, section 3.2) still apply to *how* the table
+gets updated — a soft-confirmed ask from an opponent updates the table the same way, but
+the observing bot weights its downstream inferences accordingly.
+
+This estimate is a lower bound. The actual count may be higher for cards that were
+dealt to P initially and have never appeared in any ask.
 
 ### 1.3 Search intent tracking
 
@@ -88,9 +103,11 @@ the bot's perspective at decision time.
 | `oppKnown` | Cards confirmed on the opponent team (witnessed transfers to opponents) |
 | `unknown` | Cards with no confirmed location |
 | `canDeclare` | All 6 cards are provably on the bot's team |
-| `almostDeclare` | Team has 5, opponents have 0 — one card away |
+| `declareProb` | Probability the team can complete this set: `teamKnown / 6`. A spectrum — 3/6 = 0.5, 5/6 ≈ 0.83, 6/6 = 1.0 (certain). Used to gate convergence avoidance at medium+ (threshold ≥ 0.5). |
 | `teamExposed` | Bot's team has asked in this set — opponents know the team holds a base |
 | `oppExposed` | Opponents have asked in this set — they hold a base here |
+| `oppConverging` | Number of distinct opponents who have ever asked in this set |
+| `contestedByAll` | Every opponent has asked in this set — the whole enemy team is hunting it |
 | `threatLevel` | 0–1 urgency score (see section 4.3) |
 
 ### Ask-eligibility inference (medium+)
@@ -211,9 +228,18 @@ the team, not just self.
   cards in S and a different opponent has >15% probability of holding C, asks for C
   from that opponent. Signals "I'm coordinating on this set" and produces another
   elimination if it fails.
+- **Convergence avoidance** (medium+): when `declareProb ≥ 0.5` for a set the bot's
+  team is building, and an opponent is engaged in that same set (`oppConverging > 0`),
+  deprioritise asking those converging opponents. Giving them a turn hands them progress
+  on a set the bot's team is also competing for. Certainty always overrides this —
+  if `pSuccess = 1` for a specific card with a converging opponent, ask them anyway.
+- **Rescue declare — last resort** (medium): when `contestedByAll = true` for a set
+  and a teammate is the probable holder of that set's contested card, the bot may declare
+  a set it already knows (`canDeclare = true` for a different set) and pass the turn to
+  that teammate. At medium this fires only as a last resort: opponents must have ≥ 5/6
+  cards in the contested set and the teammate's base card must be confirmed (p = 1), not
+  just probable.
 - **Strategic scoring**:
-  - *Lock-out bonus* (+pSuccess × 50): when the team has 5 of 6 cards in a set and
-    zero are with opponents, this ask is the highest-leverage move in the game.
   - *Teammate support bonus* (up to +18): keep working sets that teammates are actively
     engaged in, to close them efficiently.
   - *Speculative penalty* (−(1−pSuccess) × 5): avoid opening the bot's base in a
@@ -235,7 +261,7 @@ maximises pressure on exposed sets.
   - +0.2 if the bot's team has asked in this set (opponents know we have a base)
   - +0.3 if opponents have also asked in this set (they are actively working it)
   - +0.3 if the team has ≥4 cards (close enough that stripping one card hurts badly)
-  - +0.2 if `almostDeclare` (maximum urgency — one card away)
+  - +0.2 if `declareProb ≥ 0.83` (team has ≥5 cards — maximum urgency)
   - Hard bot races to complete threatened sets before opponents strip a key card.
 - **End-game bonus** (+pSuccess × 15): when the bot's hand has ≤3 cards, turns are
   scarce. Bias heavily towards high-certainty asks to maximise output in the final
@@ -244,6 +270,17 @@ maximises pressure on exposed sets.
   a set (4+ cards) and no opponent has ever engaged that set, the remaining unknowns
   are likely with teammates. The bot reduces ask priority for those cards and redirects
   attention to sets where opponent holdings are confirmed.
+- **Rescue declare — intermediate** (hard): unlike medium, hard bots evaluate the
+  trade-off proactively rather than waiting for last resort. When `contestedByAll = true`
+  for a set and `declareProb` for that set exceeds 0.5 on the opponent side (they are
+  likely to complete it soon), the bot calculates whether spending a held declaration
+  now is worth it:
+  - Worth it if: a teammate's base card is confirmed or highly probable (p ≥ 0.7) AND
+    the declaration being spent is not the bot's only declarable set.
+  - Pass target: prefer the teammate with the contested base card; if multiple candidates
+    share equal probability, prefer the one who also has another declarable set (two
+    productive outcomes from one declaration). If no candidate has another set, pass to
+    the one with the highest `declareProb` across any other set.
 
 ### 4.4 Expert
 
@@ -255,6 +292,17 @@ exploiting what opponents are searching for.
 - **Search intent tracking**: maintains, per opponent, which cards they are actively
   looking for (inferred from their ask history). Intent persists until the opponent
   receives the card or deductive evidence changes the picture.
+- **Rescue declare — full evaluation** (expert): expert bots run the same trade-off
+  calculation as hard, but with richer inputs:
+  - Considers the *expected value* of the declaration being spent (how likely is the
+    team to eventually declare it anyway, discounted by how many turns it might take).
+  - Weighs this against the *expected cost* of not rescuing the teammate (how many turns
+    the opponent team gains if they complete the contested set).
+  - Pass target selection follows the same priority order as hard, but tiebreaks use
+    the full probability model: among equal-odds candidates for the contested base card,
+    prefer the one with the highest sum of `declareProb` across all their sets.
+  - Certainty override: if any opponent has a card with `pSuccess = 1`, that ask always
+    takes precedence over any rescue declare calculation.
 - **Tempo trap**:
   - Condition: opponent O is searching for card C in set S (has asked for C at least
     once). The bot does not hold C. The bot holds another card D in set S, so it is
@@ -296,6 +344,16 @@ were never transferred but that opponents have been fully eliminated from holdin
 in situations where direct and inferred checks would not yet trigger because a teammate's
 base card was never part of any ask transaction.
 
+**Check 4 — rescue declare** (medium+): when a `canDeclare` set exists and
+`contestedByAll = true` for another set, suppress the normal immediate declare and
+instead treat the declarable set as a held resource. Fire it when the rescue condition
+is met (see tier-specific thresholds in section 4.2–4.4). After firing, select a pass
+target using the priority order: (1) teammate with confirmed or high-probability base
+card for the contested set who also has another declarable set, (2) teammate with
+confirmed or high-probability base card for the contested set, (3) teammate with any
+declarable set, (4) random. Medium bots use confirmed-only (p = 1) for base card
+detection; hard and expert use probabilistic thresholds.
+
 ---
 
 ## 6. Candidate Scoring Summary
@@ -305,9 +363,11 @@ The score for a candidate ask `(card C, target T)` at each tier:
 ```
 score = pSuccess × (10 + teamKnown × 8)          -- all tiers
 
-      + pSuccess × 50   [if almostDeclare]         -- medium+
       + min(teamAsks, 3) × 6                       -- medium+
       − (1 − pSuccess) × 5  [if speculative]       -- medium+
+      − avoidanceWeight     [if oppConverging > 0  -- medium+
+                             and declareProb ≥ 0.5
+                             and pSuccess < 1]
 
       − 8               [if fresh set, hard+]       -- hard+
       + threatLevel × 30                            -- hard+
@@ -315,6 +375,14 @@ score = pSuccess × (10 + teamKnown × 8)          -- all tiers
 
       + trapBonus       [if tempo trap eligible]    -- expert only
 ```
+
+Where `avoidanceWeight` scales with convergence pressure:
+```
+avoidanceWeight = oppConverging × 10 × declareProb
+```
+A fully converging opponent group (`oppConverging = 3`) on a set the team is 80% likely
+to complete scores −24 avoidance weight. Certainty (`pSuccess = 1`) bypasses this
+entirely — the term is zeroed out.
 
 Where `trapBonus` is the expected value of the wasted opponent turn:
 ```

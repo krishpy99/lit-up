@@ -80,7 +80,6 @@
  *
  * ─── SCORING FORMULA ─────────────────────────────────────────────────────────
  * score = pSuccess × (10 + teamKnown × 8)
- *       + lockOutBonus    (almostDeclare → +50 × pSuccess)           medium+
  *       + hintBonus       (teammates working this set → up to +18)   medium+
  *       − specPenalty     (low-info blind guess → −(1−p) × 5)        medium+
  *       − leakagePenalty  (fresh set → −8)                           hard/expert
@@ -353,7 +352,17 @@ export function decideBotAction(
 
   if (ctx.opponents.length === 0) return { type: "pass" };
 
-  // 1d. Expert post-declare pass: after a successful declare (postDeclareId
+  // 1d. Medium+: rescue pass — if opponents are one card from completing a set
+  //     where our team also holds cards (oppKnown >= 5), pass to whichever
+  //     teammate holds the most cards in that set so they can declare first.
+  //     This runs on both the normal path and the post-declare call so the
+  //     engine's follow-up invocation (postDeclareId === bot.id) also benefits.
+  if (ctx.diff !== "easy") {
+    const rescueTarget = pickRescuePassTarget(ctx);
+    if (rescueTarget) return { type: "pass", toPlayerId: rescueTarget };
+  }
+
+  // 1e. Expert post-declare pass: after a successful declare (postDeclareId
   //     is this bot), decide whether to keep the turn or hand it to a better-
   //     positioned teammate. Pass when a teammate has more known cards in a
   //     nearly-completable set than we can exploit in one ask, signalling that
@@ -385,7 +394,7 @@ export function decideBotAction(
  * Values sum to ≤ 1 over all eligible players; 0 for eliminated / self.
  */
 function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
-  const { ck, hands, txLog, myHand, allPlayers, bot, teamCards } = ctx;
+  const { ck, hands, myHand, allPlayers, bot, teamCards } = ctx;
   const setKey = CARD_TO_SET.get(card)!;
   const odds = new Map<string, number>(allPlayers.map(p => [p.id, 0]));
 
@@ -408,11 +417,6 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
     if (h) knownInSet.set(h, (knownInSet.get(h) ?? 0) + 1);
   }
 
-  const setAskers = new Set<string>();
-  for (const tx of txLog) {
-    if (tx.setKey === setKey) setAskers.add(tx.askerId);
-  }
-
   const eligible = allPlayers.filter(
     p =>
       p.id !== bot.id &&
@@ -429,7 +433,10 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
     const handSize = Math.max(1, hands.get(p.id)?.length ?? 1);
     let w = handSize;
     w += (knownInSet.get(p.id) ?? 0) * 5;
-    if (setAskers.has(p.id)) w *= 1.8;
+    // Apply set-engagement bonus for any player with confirmed set membership
+    // (hard or soft). Hard = certain; soft = probable. Both justify the bonus.
+    const psi = ctx.playerSetKnowledge.get(p.id)?.get(setKey);
+    if (psi && psi.membership !== null) w *= 1.8;
     weights.set(p.id, w);
     totalWeight += w;
   }
@@ -460,6 +467,12 @@ interface SetAnalysis {
   oppExposed: boolean;
   /** 0–1 urgency: how much to race to complete this set before opponents do. */
   threatLevel: number;
+  /** teamKnown / 6 — probability the team can declare this set soon. */
+  declareProb: number;
+  /** Distinct opponents who have minCount >= 1 for this set. */
+  oppConverging: number;
+  /** Every active opponent has minCount >= 1 for this set. */
+  contestedByAll: boolean;
 }
 
 function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
@@ -520,11 +533,27 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
     if (almostDeclare) threatLevel += 0.2;
   }
 
+  const declareProb = teamKnown / 6;
+
+  // Count opponents (players NOT on the bot's team) with minCount >= 1 for this set.
+  const activeOpponents = ctx.state.players
+    ? [...ctx.state.players.values()].filter(p => p.team !== ctx.bot.team && (ctx.hands.get(p.id) ?? []).length > 0)
+    : [];
+  let oppConverging = 0;
+  for (const opp of activeOpponents) {
+    const setInfo = ctx.playerSetKnowledge.get(opp.id)?.get(setKey);
+    if (setInfo && setInfo.minCount >= 1) oppConverging++;
+  }
+  const contestedByAll = activeOpponents.length > 0 && oppConverging === activeOpponents.length;
+
   return {
     teamKnown, oppKnown, unknown,
     canDeclare, almostDeclare,
     teamExposed, oppExposed,
     threatLevel,
+    declareProb,
+    oppConverging,
+    contestedByAll,
   };
 }
 
@@ -714,6 +743,48 @@ function pickTempoTrap(ctx: BotCtx): Candidate | null {
   return bestCandidate;
 }
 
+// ── Rescue pass (medium / hard / expert) ──────────────────────────────────
+
+/**
+ * Last-resort defensive pass: if opponents have ≥ 5 confirmed cards in a set
+ * where our team also holds cards, we are about to lose that set. Pass to
+ * whichever eligible teammate holds the most cards in the most threatened set
+ * so they can declare before the opponent does.
+ *
+ * Returns a teammate playerId to pass to, or null if no rescue is needed.
+ */
+function pickRescuePassTarget(ctx: BotCtx): string | null {
+  const { teammates, hands, claimed } = ctx;
+  const eligibleTeammates = teammates.filter(
+    (t) => (hands.get(t.id) ?? []).length > 0,
+  );
+  if (eligibleTeammates.length === 0) return null;
+
+  let bestTarget: string | null = null;
+  let bestCards = 0;
+
+  for (const s of SET_DEFS) {
+    if (claimed.has(s.key)) continue;
+    const sa = analyzeSet(s.key, ctx);
+    // Rescue condition: opponents have 5 of 6 cards confirmed (one away from
+    // declaring) AND our team holds at least one card in the set.
+    if (sa.oppKnown < 5) continue;
+    if (sa.teamKnown === 0) continue;
+
+    // Find the teammate who holds the most cards in this set.
+    for (const tm of eligibleTeammates) {
+      const tmHand = hands.get(tm.id) ?? [];
+      const tmCards = s.cards.filter((c) => tmHand.includes(c)).length;
+      if (tmCards > bestCards) {
+        bestCards = tmCards;
+        bestTarget = tm.id;
+      }
+    }
+  }
+
+  return bestTarget;
+}
+
 // ── Intelligent post-declare pass (expert only) ────────────────────────────
 
 /**
@@ -799,9 +870,6 @@ function scoreAsk(
 
   // ── Medium + ─────────────────────────────────────────────────────────────
 
-  // Lock-out: one card from a declaration — highest-leverage ask in the game.
-  if (sa.almostDeclare) s += pSuccess * 50;
-
   // Support: keep working sets teammates are engaged in.
   const teamAsks = ctx.teammateAsksInSet.get(setKey) ?? 0;
   s += Math.min(teamAsks, 3) * 6;
@@ -810,6 +878,11 @@ function scoreAsk(
   // base without a meaningful return.
   if (sa.unknown > 2 && sa.teamKnown + sa.oppKnown < 3) {
     s -= (1 - pSuccess) * 5;
+  }
+
+  // Convergence avoidance: deprioritise handing turns to opponents racing for our set.
+  if (sa.oppConverging > 0 && sa.declareProb >= 0.5 && pSuccess < 1.0) {
+    s -= sa.oppConverging * 10 * sa.declareProb;
   }
 
   if (diff === "hard" || diff === "expert") {

@@ -180,7 +180,9 @@ export function startGame(state: GameState, hands: HandStore, txLog: Transaction
     p.cardCount = hands.get(id)!.length;
   });
 
-  state.turnId = ids.find((id) => (hands.get(id)?.length ?? 0) > 0) ?? "";
+  const startIdx = Math.floor(Math.random() * ids.length);
+  const startingIds = [...ids.slice(startIdx), ...ids.slice(0, startIdx)];
+  state.turnId = startingIds.find((id) => (hands.get(id)?.length ?? 0) > 0) ?? "";
   pushAction(state, "Game started — cards dealt!");
 }
 
@@ -311,11 +313,9 @@ export function applyDeclare(
   if (!set) return "Unknown set.";
   if (isSetClaimed(state, setKey)) return "Set already claimed.";
 
-  // Ensure declaring team holds at least one card from the set.
-  const teamHasBaseCard = [...state.players.values()]
-    .filter((p) => p.team === declarer.team)
-    .some((p) => (hands.get(p.id) ?? []).some((c) => set.cards.includes(c)));
-  if (!teamHasBaseCard) return "Your team must hold at least one card from this set.";
+  // Declarer must personally hold at least one card from the set.
+  const declarerHasBaseCard = (hands.get(declarerId) ?? []).some((c) => set.cards.includes(c));
+  if (!declarerHasBaseCard) return "You must hold a card from this set to declare it.";
 
   const teammateIds = new Set(
     [...state.players.values()].filter((p) => p.team === declarer.team).map((p) => p.id),

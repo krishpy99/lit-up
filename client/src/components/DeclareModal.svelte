@@ -22,10 +22,12 @@
 
   let claimed = $derived(new Set<SetKey>([...room.claimedA, ...room.claimedB]));
   let teammates = $derived(room.players.filter((p) => p.team === you.team));
-  // Show all unclaimed sets. The declarer is allowed to declare any set as long as
-  // their team holds at least one card from it — the server enforces this. Filtering
-  // to only sets the declarer personally holds a card from is too restrictive.
-  let availableSets = $derived(SET_DEFS.filter((s) => !claimed.has(s.key)));
+  // Only show sets where the declarer personally holds at least one card (base card).
+  // The server enforces this too — keeping UI in sync prevents the confusing case
+  // where you pick a set and immediately get a server rejection.
+  let availableSets = $derived(
+    SET_DEFS.filter((s) => !claimed.has(s.key) && s.cards.some((c) => hand.includes(c)))
+  );
 
   let selectedSet = $state<SetKey>("");
   let assignments = $state<Record<Card, string>>({});

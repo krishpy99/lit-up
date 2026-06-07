@@ -610,9 +610,18 @@ export class LiteratureRoom extends Room<GameState> {
           }
           // Otherwise, let the bot continue on its turn (scheduleBot below).
         }
+        // Note: if applyDeclare returned an error the state is unchanged; the
+        // forced advance below will move the turn regardless.
       } else {
-        // Bot's knowledge was stale — skip and advance turn to avoid infinite loop.
-        ensureValidTurn(this.state, this.hands);
+        // Bot declared a set it doesn't actually hold — its knowledge was stale
+        // or inferred incorrectly. Force-advance to the next player with cards so
+        // the game cannot wedge on this bot. ensureValidTurn is a no-op when the
+        // bot still holds cards, so we find the next player explicitly.
+        const next = findNextPlayerWithCards(this.state, this.hands, bot.id);
+        if (next) {
+          this.state.turnId = next;
+          pushAction(this.state, `${bot.name} yielded turn (stale declare).`);
+        }
       }
       this.scheduleBot(true);
       return;

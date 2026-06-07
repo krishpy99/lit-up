@@ -17,6 +17,7 @@ import {
   type AskCommand,
   type DeclareCommand,
   type JoinOptions,
+  type MovePlayerCommand,
   type PassCommand,
   type SetBotDifficultyCommand,
   type SetRoomConfigCommand,
@@ -123,6 +124,9 @@ export class LiteratureRoom extends Room<GameState> {
     );
     this.onMessage("set_room_config", (client, msg: SetRoomConfigCommand) =>
       this.handleSetRoomConfig(client, msg),
+    );
+    this.onMessage("move_player", (client, msg: MovePlayerCommand) =>
+      this.handleMovePlayer(client, msg),
     );
   }
 
@@ -523,6 +527,26 @@ export class LiteratureRoom extends Room<GameState> {
       // 0 = "all"; otherwise clamp to a sane visible range.
       this.state.defaultLogCount = n === 0 ? 0 : Math.max(1, n);
     }
+  }
+
+  private handleMovePlayer(client: Client, msg: MovePlayerCommand): void {
+    if (!this.requireHost(client)) return;
+    if (this.state.status !== "lobby") {
+      this.dispatchError(client, "Teams are locked once the game starts.");
+      return;
+    }
+    const target = this.state.players.get(msg?.playerId);
+    if (!target) {
+      this.dispatchError(client, "Player not found.");
+      return;
+    }
+    if (msg?.team !== "A" && msg?.team !== "B") {
+      this.dispatchError(client, "Invalid team.");
+      return;
+    }
+    if (target.team === msg.team) return; // already on that team, no-op
+    target.team = msg.team;
+    pushAction(this.state, `${target.name} moved to Team ${msg.team}.`);
   }
 
   // ── Bot scheduler ────────────────────────────────────────

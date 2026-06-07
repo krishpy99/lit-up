@@ -15,6 +15,7 @@ import {
   type DeclareCommand,
   type GameStatus,
   type JoinOptions,
+  type MovePlayerCommand,
   type SetKey,
   type SetRoomConfigCommand,
   type Team,
@@ -436,6 +437,9 @@ class GameClient {
   }
   setRoomConfig(cfg: SetRoomConfigCommand): void {
     this.room?.send("set_room_config", cfg);
+  }
+  movePlayer(cmd: MovePlayerCommand): void {
+    this.room?.send("move_player", cmd);
   }
 
   // ── Derived helpers ──────────────────────────────────────

@@ -1,16 +1,21 @@
 <script lang="ts">
-  import { LOG_COUNT_OPTIONS, MIN_PLAYERS, type BotDifficulty } from "@lit-up/shared";
+  import { LOG_COUNT_OPTIONS, MIN_PLAYERS, type BotDifficulty, type Team } from "@lit-up/shared";
   import { game } from "../lib/client.svelte";
   import Avatar from "../components/Avatar.svelte";
 
   let inviteCopied = $state(false);
+  let draggedPlayerId = $state<string | null>(null);
+  let dragOverTeam = $state<Team | null>(null);
 
   const difficulties: BotDifficulty[] = ["easy", "medium", "hard", "expert"];
 
   function canStart(): boolean {
     const r = game.room$;
     if (!r) return false;
-    return r.players.length >= MIN_PLAYERS && r.players.length % 2 === 0;
+    if (r.players.length < MIN_PLAYERS) return false;
+    const countA = r.players.filter((p) => p.team === "A").length;
+    const countB = r.players.filter((p) => p.team === "B").length;
+    return countA === countB;
   }
 
   async function copyInvite() {
@@ -24,6 +29,36 @@
     } catch {
       game.toast("Couldn't copy link.", "error");
     }
+  }
+
+  function onDragStart(e: DragEvent, playerId: string) {
+    draggedPlayerId = playerId;
+    e.dataTransfer?.setData("text/plain", playerId);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+  }
+
+  function onDragEnd() {
+    draggedPlayerId = null;
+    dragOverTeam = null;
+  }
+
+  function onDragOver(e: DragEvent, team: Team) {
+    e.preventDefault();
+    dragOverTeam = team;
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+  }
+
+  function onDragLeave() {
+    dragOverTeam = null;
+  }
+
+  function onDrop(e: DragEvent, team: Team) {
+    e.preventDefault();
+    dragOverTeam = null;
+    const pid = draggedPlayerId ?? e.dataTransfer?.getData("text/plain");
+    draggedPlayerId = null;
+    if (!pid) return;
+    game.movePlayer({ playerId: pid, team });
   }
 </script>
 
@@ -117,11 +152,26 @@
     <div class="teams-grid">
       {#each (["A", "B"] as const) as team (team)}
         {@const teamPlayers = room.players.filter((p) => p.team === team)}
-        <div class="team-column">
+        <div
+          class="team-column"
+          class:drop-target={game.isHost && dragOverTeam === team}
+          role="list"
+          ondragover={game.isHost ? (e) => onDragOver(e, team) : undefined}
+          ondragleave={game.isHost ? onDragLeave : undefined}
+          ondrop={game.isHost ? (e) => onDrop(e, team) : undefined}
+        >
           <div class="team-heading team-heading-{team.toLowerCase()}">Team {team}</div>
           <div class="player-grid">
             {#each teamPlayers as p (p.id)}
-              <div class="player-card" class:team-b={p.team === "B"}>
+              <div
+                class="player-card"
+                class:team-b={p.team === "B"}
+                class:dragging={draggedPlayerId === p.id}
+                role="listitem"
+                draggable={game.isHost}
+                ondragstart={game.isHost ? (e) => onDragStart(e, p.id) : undefined}
+                ondragend={game.isHost ? onDragEnd : undefined}
+              >
                 <Avatar name={p.name} avatar={p.avatar} character={p.character} team={p.team} size={42} />
                 <div class="player-meta">
                   <strong>
@@ -131,6 +181,9 @@
                   </strong>
                   <span>{p.connected ? "Ready" : "⚠ Disconnected"}</span>
                 </div>
+                {#if game.isHost}
+                  <span class="drag-handle" aria-hidden="true">⠿</span>
+                {/if}
               </div>
             {/each}
             {#if teamPlayers.length === 0}
@@ -140,7 +193,7 @@
         </div>
       {/each}
     </div>
-    <p class="muted lobby-hint">Minimum {MIN_PLAYERS} players, even count.</p>
+    <p class="muted lobby-hint">Minimum {MIN_PLAYERS} players, equal teams.</p>
   </section>
 {/if}
 
@@ -241,5 +294,33 @@
     color: var(--muted);
     font-size: 0.78rem;
     line-height: 1.4;
+  }
+
+  .team-column {
+    border-radius: 10px;
+    border: 2px solid transparent;
+    padding: 4px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .team-column.drop-target {
+    border-color: var(--accent);
+    background: rgba(52, 211, 153, 0.06);
+  }
+
+  .player-card.dragging {
+    opacity: 0.4;
+  }
+
+  .drag-handle {
+    color: var(--muted);
+    font-size: 1rem;
+    cursor: grab;
+    flex-shrink: 0;
+    margin-left: auto;
+    opacity: 0.5;
+    user-select: none;
+  }
+  .player-card:hover .drag-handle {
+    opacity: 1;
   }
 </style>

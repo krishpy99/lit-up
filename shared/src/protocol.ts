@@ -43,6 +43,13 @@ export interface SetRoomConfigCommand {
   defaultLogCount?: number;
 }
 
+export interface MovePlayerCommand {
+  /** The player id to move. */
+  playerId: string;
+  /** The team to move the player to. */
+  team: "A" | "B";
+}
+
 export const LOG_COUNT_OPTIONS: ReadonlyArray<{ value: number; label: string }> = [
   { value: 3, label: "3" },
   { value: 5, label: "5" },

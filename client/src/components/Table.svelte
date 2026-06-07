@@ -61,18 +61,17 @@
 <div class="game-arena">
   <div class="felt">
     <div class="felt-center">
+      {#if room.status === "ended"}
+        <div class="winner">
+          {room.winnerTeam ? `Team ${room.winnerTeam} wins!` : "Game tied"}
+        </div>
+      {/if}
       <Scoreboard {room} />
     </div>
   </div>
 
   {#if room.status === "ended"}
     <div class="felt-over-banner">
-      <div class="over-top">
-        <div class="winner">
-          {room.winnerTeam ? `Team ${room.winnerTeam} wins!` : "Game tied"}
-        </div>
-        <div class="sub">{room.scoreA} – {room.scoreB}</div>
-      </div>
       <div class="over-actions">
         {#if game.isHost}
           <button class="btn btn-primary btn-sm" onclick={() => game.resetGame()}>

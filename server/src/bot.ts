@@ -118,6 +118,17 @@ import {
 type BotDifficulty = "easy" | "medium" | "hard" | "expert";
 import type { GameState, Player } from "./schema.js";
 import type { CardKnowledge, HandStore, Transaction, TransactionLog } from "./rules.js";
+import { appendFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { resolve, dirname } from "path";
+
+const _botLogPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../bot-thinking.log");
+const BOT_LOG = process.env.NODE_ENV !== "production";
+
+function botLog(entry: object): void {
+  if (!BOT_LOG) return;
+  appendFileSync(_botLogPath, JSON.stringify(entry) + "\n");
+}
 
 export type BotAction =
   | { type: "ask"; targetId: string; card: Card }
@@ -178,6 +189,7 @@ interface BotCtx {
    * Used by expert tier for tempo-trap detection.
    */
   opponentIntents: Map<string, Set<Card>>;
+
 }
 
 function buildContext(
@@ -279,6 +291,7 @@ function buildContext(
         intents.add(tx.card); // still searching
       }
     }
+
   }
 
   // Single backward pass to find the most recent teammate ask for echo detection.
@@ -319,45 +332,42 @@ export function decideBotAction(
   for (const s of SET_DEFS) {
     if (ctx.claimed.has(s.key)) continue;
     if (s.cards.every(c => ctx.teamCards.has(c))) {
+      botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", path: "1a-direct", setKey: s.key });
       return { type: "declare", setKey: s.key };
     }
   }
 
-  // 1b. Inferred declare: every card is either in teamCards/myHand OR has P = 0
-  //     for all opponents (eliminated via ck.absent). Covers cards that were never
-  //     transferred but that opponents have been fully eliminated from.
+  // 1b. Certainty-only inferred declare: every card is either in teamCards/myHand
+  //     OR all opponents have been concretely eliminated from holding it (via
+  //     ck.absent — failed asks or witnessed transfers). This covers cards that
+  //     were never transferred but that opponents have been fully eliminated from.
+  //     INVARIANT: only fires from concrete evidence in ck; inference never gates a
+  //     declare. The team must hold at least one card in the set to be eligible.
   for (const s of SET_DEFS) {
     if (ctx.claimed.has(s.key)) continue;
     if (!s.cards.some(c => ctx.myHand.includes(c) || ctx.teamCards.has(c))) continue;
-    const allOnTeam = s.cards.every(c => {
+    const allCertain = s.cards.every(c => {
+      // Confirmed on team via transaction log.
       if (ctx.myHand.includes(c) || ctx.teamCards.has(c)) return true;
-      const cardOdds = computeCardOdds(c, ctx);
-      return ctx.opponents.every(o => (cardOdds.get(o.id) ?? 0) < 0.001);
+      // All opponents are concretely eliminated via ck.absent.
+      const absent = ctx.ck.get(c)?.absent ?? new Set<string>();
+      return ctx.opponents.every(o => absent.has(o.id));
     });
-    if (allOnTeam) return { type: "declare", setKey: s.key };
-  }
-
-  // 1c. Ask-eligibility declare (medium+): a teammate's untracked base card
-  //     completes the set. analyzeSet incorporates this inference for medium+,
-  //     so canDeclare here reflects base cards that 1a/1b would miss.
-  if (ctx.diff !== "easy") {
-    for (const s of SET_DEFS) {
-      if (ctx.claimed.has(s.key)) continue;
-      if (!s.cards.some(c => ctx.myHand.includes(c) || ctx.teamCards.has(c))) continue;
-      if (analyzeSet(s.key, ctx).canDeclare) {
-        return { type: "declare", setKey: s.key };
-      }
+    if (allCertain) {
+      botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", path: "1b-certain", setKey: s.key });
+      return { type: "declare", setKey: s.key };
     }
   }
 
-  if (ctx.opponents.length === 0) return { type: "pass" };
+  if (ctx.opponents.length === 0) {
+    botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "pass", reason: "no-opponents" });
+    return { type: "pass" };
+  }
 
-  // 1d. Medium+: rescue pass — if opponents are one card from completing a set
-  //     where our team also holds cards (oppKnown >= 5), pass to whichever
-  //     teammate holds the most cards in that set so they can declare first.
-  //     This runs on both the normal path and the post-declare call so the
-  //     engine's follow-up invocation (postDeclareId === bot.id) also benefits.
-  if (ctx.diff !== "easy") {
+  // 1d. Medium+: rescue pass — after declaring a set (postDeclareId === bot.id),
+  //     pass to whichever teammate is best positioned to protect against the
+  //     opponent's near-complete set (oppKnown >= 5).
+  if (ctx.diff !== "easy" && state.postDeclareId === bot.id) {
     const rescueTarget = pickRescuePassTarget(ctx);
     if (rescueTarget) return { type: "pass", toPlayerId: rescueTarget };
   }
@@ -377,6 +387,7 @@ export function decideBotAction(
   if (candidates.length === 0) {
     const fallback = pickRandomAsk(ctx);
     if (fallback) return fallback;
+    botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "pass", reason: "no-candidates" });
     return { type: "pass" };
   }
 
@@ -384,6 +395,32 @@ export function decideBotAction(
   const topScore = candidates[0].score;
   const top = candidates.filter(c => c.score >= topScore - 0.001);
   const pick = top[Math.floor(Math.random() * top.length)];
+
+  if (BOT_LOG) {
+    const setAnalyses = SET_DEFS
+      .filter(s => !ctx.claimed.has(s.key))
+      .map(s => { const sa = analyzeSet(s.key, ctx); return { set: s.key, ...sa }; });
+    botLog({
+      ts: new Date().toISOString(),
+      bot: bot.id,
+      name: bot.name,
+      diff: ctx.diff,
+      hand: ctx.myHand,
+      teamCards: [...ctx.teamCards],
+      setAnalyses,
+      topCandidates: candidates.slice(0, 10).map(c => ({
+        card: c.card,
+        target: ctx.allPlayers.find(p => p.id === c.targetId)?.name ?? c.targetId,
+        score: Math.round(c.score * 100) / 100,
+      })),
+      chosen: {
+        card: pick.card,
+        target: ctx.allPlayers.find(p => p.id === pick.targetId)?.name ?? pick.targetId,
+        score: Math.round(pick.score * 100) / 100,
+      },
+    });
+  }
+
   return { type: "ask", targetId: pick.targetId, card: pick.card };
 }
 
@@ -401,19 +438,22 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
   if (myHand.includes(card)) return odds;
   if (teamCards.has(card)) return odds;
 
-  const info = ck.get(card);
+  // Easy bot: 5% chance to forget any individual piece of known information.
+  const forget = ctx.diff === "easy" && Math.random() < 0.05;
+
+  const info = forget ? undefined : ck.get(card);
 
   if (info?.holder) {
     odds.set(info.holder, 1.0);
     return odds;
   }
 
-  const absent = info?.absent ?? new Set<string>();
+  const absent = forget ? new Set<string>() : (info?.absent ?? new Set<string>());
 
   const knownInSet = new Map<string, number>();
   for (const c of SET_LOOKUP[setKey].cards) {
     if (c === card) continue;
-    const h = ck.get(c)?.holder;
+    const h = forget ? undefined : ck.get(c)?.holder;
     if (h) knownInSet.set(h, (knownInSet.get(h) ?? 0) + 1);
   }
 
@@ -451,15 +491,24 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
 // ── Set analysis ───────────────────────────────────────────────────────────
 
 interface SetAnalysis {
-  /** Cards provably on our team (explicit + inferred base cards for medium+). */
+  /**
+   * Cards provably on our team via CONCRETE evidence only (own hand + witnessed
+   * transfers via transaction log + ck.holder). Never inflated by inference.
+   * This is the gating field for canDeclare and almostDeclare.
+   */
+  teamCertain: number;
+  /**
+   * Cards estimated on our team, including ask-eligibility inference (medium+).
+   * May exceed teamCertain. Used for scoring/urgency only — NEVER gates a declare.
+   */
   teamKnown: number;
   /** Cards provably on the opponent team (via ck.holder). */
   oppKnown: number;
   /** Cards with no confirmed location. */
   unknown: number;
-  /** Team holds all 6 — ready to declare. */
+  /** All 6 cards are provably on the bot's team (based on teamCertain only). */
   canDeclare: boolean;
-  /** Team has 5, opponents have 0 — one card away from declaring. */
+  /** teamCertain === 5 and no opponent holds any card — one away from declaring. */
   almostDeclare: boolean;
   /** Our team has asked in this set → opponents know we have a base. */
   teamExposed: boolean;
@@ -479,16 +528,18 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
   const { ck, txLog, teamCards, myHand, bot, state, diff, teammates, playerSetKnowledge } = ctx;
   const set = SET_LOOKUP[setKey];
 
-  let teamKnown = 0, oppKnown = 0, unknown = 0;
+  // teamCertain: concrete evidence only (own hand + txLog transfers + ck.holder).
+  // teamKnown: teamCertain + ask-eligibility inference for medium+ (scoring only).
+  let teamCertain = 0, oppKnown = 0, unknown = 0;
 
   for (const card of set.cards) {
     if (myHand.includes(card) || teamCards.has(card)) {
-      teamKnown++;
+      teamCertain++;
     } else {
       const h = ck.get(card)?.holder;
       if (h) {
         const holder = state.players.get(h);
-        if (holder?.team === bot.team) teamKnown++;
+        if (holder?.team === bot.team) teamCertain++;
         else oppKnown++;
       } else {
         unknown++;
@@ -496,9 +547,13 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
     }
   }
 
+  // teamKnown starts equal to teamCertain; medium+ may inflate it via inference.
+  let teamKnown = teamCertain;
+
   // Medium+: add untracked teammate base cards via ask-eligibility inference.
   // A teammate who asked in this set held ≥1 base card; if minCount exceeds what
   // we can account for via explicit transfers, the difference is untracked base cards.
+  // IMPORTANT: this only feeds teamKnown (scoring/urgency), NOT teamCertain.
   if (diff !== "easy") {
     for (const teammate of teammates) {
       const setInfo = playerSetKnowledge.get(teammate.id)?.get(setKey);
@@ -514,8 +569,9 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
     }
   }
 
-  const canDeclare = teamKnown >= 6;
-  const almostDeclare = teamKnown === 5 && oppKnown === 0;
+  // canDeclare and almostDeclare are gated on teamCertain, not teamKnown.
+  const canDeclare = teamCertain >= 6;
+  const almostDeclare = teamCertain === 5 && oppKnown === 0;
 
   let teamExposed = false, oppExposed = false;
   for (const tx of txLog) {
@@ -533,6 +589,7 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
     if (almostDeclare) threatLevel += 0.2;
   }
 
+  // declareProb uses teamKnown (includes inference) for smoother scoring.
   const declareProb = teamKnown / 6;
 
   // Count opponents (players NOT on the bot's team) with minCount >= 1 for this set.
@@ -547,7 +604,7 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
   const contestedByAll = activeOpponents.length > 0 && oppConverging === activeOpponents.length;
 
   return {
-    teamKnown, oppKnown, unknown,
+    teamCertain, teamKnown, oppKnown, unknown,
     canDeclare, almostDeclare,
     teamExposed, oppExposed,
     threatLevel,
@@ -760,29 +817,48 @@ function pickRescuePassTarget(ctx: BotCtx): string | null {
   );
   if (eligibleTeammates.length === 0) return null;
 
-  let bestTarget: string | null = null;
-  let bestCards = 0;
-
-  for (const s of SET_DEFS) {
-    if (claimed.has(s.key)) continue;
+  // Collect contested sets: opponents have 5/6 confirmed and team holds at least one.
+  const contestedSets = SET_DEFS.filter((s) => {
+    if (claimed.has(s.key)) return false;
     const sa = analyzeSet(s.key, ctx);
-    // Rescue condition: opponents have 5 of 6 cards confirmed (one away from
-    // declaring) AND our team holds at least one card in the set.
-    if (sa.oppKnown < 5) continue;
-    if (sa.teamKnown === 0) continue;
+    return sa.oppKnown >= 5 && sa.teamKnown > 0;
+  });
+  if (contestedSets.length === 0) return null;
 
-    // Find the teammate who holds the most cards in this set.
-    for (const tm of eligibleTeammates) {
-      const tmHand = hands.get(tm.id) ?? [];
-      const tmCards = s.cards.filter((c) => tmHand.includes(c)).length;
-      if (tmCards > bestCards) {
-        bestCards = tmCards;
-        bestTarget = tm.id;
-      }
-    }
+  // For each eligible teammate score them by priority tier:
+  //   Tier 1 — holds a base card in a contested set AND has another canDeclare set
+  //   Tier 2 — holds a base card in a contested set
+  //   Tier 3 — has any canDeclare set
+  //   Tier 4 — everyone else (random fallback)
+  // Within each tier, collect all tied candidates and pick randomly.
+
+  function hasBaseInContested(tmId: string): boolean {
+    const tmHand = hands.get(tmId) ?? [];
+    return contestedSets.some((s) => s.cards.some((c) => tmHand.includes(c)));
   }
 
-  return bestTarget;
+  function hasOtherDeclare(tmId: string): boolean {
+    return SET_DEFS.some((s) => {
+      if (claimed.has(s.key)) return false;
+      return analyzeSet(s.key, ctx).canDeclare &&
+        (hands.get(tmId) ?? []).some((c) => s.cards.includes(c));
+    });
+  }
+
+  function pickRandom(pool: typeof eligibleTeammates): string {
+    return pool[Math.floor(Math.random() * pool.length)].id;
+  }
+
+  const tier1 = eligibleTeammates.filter((t) => hasBaseInContested(t.id) && hasOtherDeclare(t.id));
+  if (tier1.length > 0) return pickRandom(tier1);
+
+  const tier2 = eligibleTeammates.filter((t) => hasBaseInContested(t.id));
+  if (tier2.length > 0) return pickRandom(tier2);
+
+  const tier3 = eligibleTeammates.filter((t) => hasOtherDeclare(t.id));
+  if (tier3.length > 0) return pickRandom(tier3);
+
+  return pickRandom(eligibleTeammates);
 }
 
 // ── Intelligent post-declare pass (expert only) ────────────────────────────
@@ -850,6 +926,65 @@ function pickIntelligentPassTarget(ctx: BotCtx): string | null {
   return null;
 }
 
+// ── Dangerous-target detection (medium+) ──────────────────────────────────
+
+/**
+ * Returns true when targeting `targetId` for an ask is dangerous: the opponent
+ * is searching for a card C that is already confirmed (or likely) on our team.
+ * If we give this opponent a turn by failing, they can immediately ask for C.
+ *
+ * Specifically: the opponent has asked for card C in some set S (per txLog),
+ * AND a teammate of the bot holds C (confirmed via ck.holder or via
+ * set-count elimination with all opponents absent).
+ */
+function isDangerousTarget(targetId: string, card: Card, ctx: BotCtx): boolean {
+  const { ck, txLog, bot, state, hands, playerSetKnowledge } = ctx;
+
+  // Collect cards the opponent has searched for (failed asks).
+  const soughtByTarget = new Set<Card>();
+  for (const tx of txLog) {
+    if (tx.askerId !== targetId) continue;
+    if (!tx.success) soughtByTarget.add(tx.card);
+    else soughtByTarget.delete(tx.card); // resolved
+  }
+
+  if (soughtByTarget.size === 0) return false;
+
+  const allPlayers = [...state.players.values()];
+  const teammates = allPlayers.filter(p => p.team === bot.team && p.id !== bot.id);
+
+  for (const soughtCard of soughtByTarget) {
+    const soughtSetKey = CARD_TO_SET.get(soughtCard);
+    if (!soughtSetKey) continue;
+
+    // 1. Hard confirm via ck — concrete witnessed transfer.
+    const ckInfo = ck.get(soughtCard);
+    if (ckInfo?.holder) {
+      const holder = state.players.get(ckInfo.holder);
+      if (holder?.team === bot.team) return true;
+    }
+
+    // 2. All opponents concretely eliminated via ck.absent — card must be on team.
+    const absent = ck.get(soughtCard)?.absent ?? new Set<string>();
+    const allOpponents = allPlayers.filter(
+      p => p.team !== bot.team && (hands.get(p.id) ?? []).length > 0,
+    );
+    const allOpponentsEliminated = allOpponents.every(o => absent.has(o.id));
+
+    if (allOpponentsEliminated) {
+      // Confirm a teammate has at least one card in this set (so the card is
+      // plausibly with them, not floating in the ether).
+      const teammateHoldsInSet = teammates.some(tm => {
+        const setInfo = playerSetKnowledge.get(tm.id)?.get(soughtSetKey);
+        return setInfo && setInfo.minCount >= 1;
+      });
+      if (teammateHoldsInSet) return true;
+    }
+  }
+
+  return false;
+}
+
 // ── Scoring ────────────────────────────────────────────────────────────────
 
 function scoreAsk(
@@ -883,6 +1018,13 @@ function scoreAsk(
   // Convergence avoidance: deprioritise handing turns to opponents racing for our set.
   if (sa.oppConverging > 0 && sa.declareProb >= 0.5 && pSuccess < 1.0) {
     s -= sa.oppConverging * 10 * sa.declareProb;
+  }
+
+  // Dangerous opponent avoidance: penalise asking a target who is searching
+  // for a card already confirmed on our team. Giving them a turn lets them
+  // immediately chase that card. No penalty when we know we'll succeed (pSuccess === 1).
+  if (pSuccess < 1.0 && isDangerousTarget(targetId, card, ctx)) {
+    s -= 20;
   }
 
   if (diff === "hard" || diff === "expert") {

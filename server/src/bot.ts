@@ -123,7 +123,7 @@ import type { CardKnowledge, HandStore, Transaction, TransactionLog } from "./ru
 export type BotAction =
   | { type: "ask"; targetId: string; card: Card }
   | { type: "declare"; setKey: SetKey }
-  | { type: "pass" };
+  | { type: "pass"; toPlayerId?: string };
 
 // ── Knowledge model types ──────────────────────────────────────────────────
 
@@ -352,6 +352,16 @@ export function decideBotAction(
   }
 
   if (ctx.opponents.length === 0) return { type: "pass" };
+
+  // 1d. Expert post-declare pass: after a successful declare (postDeclareId
+  //     is this bot), decide whether to keep the turn or hand it to a better-
+  //     positioned teammate. Pass when a teammate has more known cards in a
+  //     nearly-completable set than we can exploit in one ask, signalling that
+  //     giving them the turn is higher EV than asking ourselves.
+  if (ctx.diff === "expert" && state.postDeclareId === bot.id) {
+    const passTarget = pickIntelligentPassTarget(ctx);
+    if (passTarget) return { type: "pass", toPlayerId: passTarget };
+  }
 
   // 2. Build candidates, score, and pick the best.
   const candidates = buildCandidates(ctx);
@@ -702,6 +712,71 @@ function pickTempoTrap(ctx: BotCtx): Candidate | null {
   }
 
   return bestCandidate;
+}
+
+// ── Intelligent post-declare pass (expert only) ────────────────────────────
+
+/**
+ * After a successful declare, decide whether to hand the turn to a teammate
+ * who is better positioned to advance a set.
+ *
+ * Returns a teammate playerId to pass to, or null to keep the turn.
+ *
+ * Logic:
+ *   - Score each teammate by how many confirmed cards they hold in sets that
+ *     are one or two cards from completion (teamKnown >= 4) and where the bot
+ *     itself has zero confirmed cards.
+ *   - If the best teammate's "readiness score" exceeds a threshold, pass to them.
+ *   - Never pass if the bot itself has the highest-readiness hand.
+ */
+function pickIntelligentPassTarget(ctx: BotCtx): string | null {
+  const { teammates, hands, bot, claimed } = ctx;
+  const eligibleTeammates = teammates.filter(
+    (t) => (hands.get(t.id) ?? []).length > 0,
+  );
+  if (eligibleTeammates.length === 0) return null;
+
+  function teammateReadiness(playerId: string): number {
+    let score = 0;
+    for (const s of SET_DEFS) {
+      if (claimed.has(s.key)) continue;
+      const sa = analyzeSet(s.key, ctx);
+      if (sa.teamKnown < 4) continue; // only near-complete sets count
+      // Does this teammate hold at least one known card in the set?
+      const tmHand = hands.get(playerId) ?? [];
+      const tmHoldsInSet = s.cards.filter((c) => tmHand.includes(c)).length;
+      if (tmHoldsInSet === 0) continue;
+      // How many cards does the bot hold in this set?
+      const botHoldsInSet = s.cards.filter((c) => ctx.myHand.includes(c)).length;
+      // Teammate earns readiness proportional to their contribution minus bot's.
+      score += (tmHoldsInSet - botHoldsInSet) * (sa.teamKnown + 1);
+    }
+    return score;
+  }
+
+  const botReadiness = (() => {
+    let score = 0;
+    for (const s of SET_DEFS) {
+      if (claimed.has(s.key)) continue;
+      const sa = analyzeSet(s.key, ctx);
+      if (sa.teamKnown < 4) continue;
+      const botHoldsInSet = s.cards.filter((c) => ctx.myHand.includes(c)).length;
+      if (botHoldsInSet === 0) continue;
+      score += botHoldsInSet * (sa.teamKnown + 1);
+    }
+    return score;
+  })();
+
+  let bestId: string | null = null;
+  let bestScore = 0;
+  for (const t of eligibleTeammates) {
+    const r = teammateReadiness(t.id);
+    if (r > bestScore) { bestScore = r; bestId = t.id; }
+  }
+
+  // Only pass if the teammate's readiness clearly exceeds the bot's.
+  if (bestId && bestScore > botReadiness + 4) return bestId;
+  return null;
 }
 
 // ── Scoring ────────────────────────────────────────────────────────────────

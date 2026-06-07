@@ -618,8 +618,18 @@ export class LiteratureRoom extends Room<GameState> {
       return;
     }
 
-    // Pass — bot has no cards left (or all remaining fallbacks exhausted).
-    ensureValidTurn(this.state, this.hands);
+    // Pass — either an intelligent post-declare pass (expert tier) or the bot
+    // has no cards / no viable asks and needs to yield the turn.
+    if (action.type === "pass" && action.toPlayerId && this.state.postDeclareId === bot.id) {
+      // Intelligent post-declare pass to a specific teammate.
+      const err = applyPass(this.state, this.hands, bot.id, action.toPlayerId);
+      if (err) {
+        // Fallback if the targeted pass was rejected (e.g. teammate now empty).
+        applyPass(this.state, this.hands, bot.id);
+      }
+    } else {
+      ensureValidTurn(this.state, this.hands);
+    }
     this.scheduleBot(true);
   }
 }

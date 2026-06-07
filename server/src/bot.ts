@@ -6,29 +6,35 @@
  * maintains a probability distribution over card locations, updated after every
  * public ask, and picks actions that maximise expected value.
  *
- * ─── CARD PROBABILITY MODEL ──────────────────────────────────────────────────
- * P(player p holds card c) is computed as follows:
+ * ─── KNOWLEDGE TABLE ─────────────────────────────────────────────────────────
+ * Every bot maintains an implicit 54×N table (card × player) updated from the
+ * public transaction log. Three layers:
  *
- *   1. Direct knowledge (ck.holder): once a card moves publicly (successful
- *      ask), P = 1 for the new holder, 0 for everyone else. The bot NEVER
- *      blind-guesses a card it has seen change hands.
+ *   Card-level (per card, per player):
+ *     P = 1   — confirmed holder (witnessed successful ask transfer)
+ *     P = 0   — eliminated (failed ask, or team-exclusion)
+ *     P ∝ ... — unknown: hand-size prior + set-engagement + known-in-set bonus
  *
- *   2. Elimination (ck.absent): after a failed ask, P = 0 for that target.
- *      Probability redistributes proportionally among remaining eligible players.
+ *   Set-level (per player, per set):
+ *     membership  — does this player hold ≥1 card here? "hard"/"soft"/"null"
+ *     minCount    — lower bound on cards held (from ask-eligibility + transfers)
  *
- *   3. Team-exclusion: if teamCards shows the card is on our team (inferred from
- *      the transaction log), P = 0 for all opponents. The bot skips those cards.
+ *   Intent (per opponent):
+ *     Which cards is this opponent actively searching for? Derived from their
+ *     ask history; resolved when they receive the card.
  *
- *   4. Hand-size prior: absent direct knowledge, P ∝ hand size. A player
- *      holding 8 cards is more likely to hold any specific card than one with 2.
+ * ─── SET-LEVEL CONFIDENCE ────────────────────────────────────────────────────
+ * When a player asks for a card in set S they reveal they hold ≥1 card there.
  *
- *   5. Set-engagement bonus (×1.8): if a player has ever asked in set S, they
- *      MUST have at least one card there. Cards in S are weighted higher for
- *      that player — they are a more likely target.
+ *   hard confirm  — teammate asks + bot is medium difficulty (honest signalling)
+ *   soft confirm  — teammate asks + bot is hard/expert (deceptive asks exist);
+ *                   OR any opponent ask (can never see their difficulty level)
  *
- *   6. Known-cards-in-set bonus (+5 per known card): if ck.holder shows that a
- *      player already holds other cards in the same set, their probability for
- *      the remaining unknown cards increases further.
+ * ─── ASK-ELIGIBILITY INFERENCE (medium+) ─────────────────────────────────────
+ * When teammate T successfully asks for card C in set S, T had to hold ≥1 base
+ * card already. That base card never appeared in the transaction log. The inference
+ * bumps teamKnown beyond what explicit transfers show, enabling immediate declares
+ * that naive tracking misses.
  *
  * ─── SET EXPOSURE & LEAKAGE ──────────────────────────────────────────────────
  * Asking in a set publicly reveals you hold at least one card there:
@@ -36,8 +42,8 @@
  *   - "Team-exposed": our team has asked in this set → opponents know we have
  *     a base here and may start targeting our holders.
  *   - "Fresh set": neither team has asked yet → asking reveals our base (leakage
- *     cost). On hard difficulty, avoid opening fresh sets unless team progress
- *     in that set is already high (≥ 4 known cards).
+ *     cost). On hard/expert difficulty, avoid opening fresh sets unless team
+ *     progress in that set is already high (≥ 4 known cards).
  *
  * ─── THREAT ASSESSMENT ───────────────────────────────────────────────────────
  * For each set where our team holds cards:
@@ -46,7 +52,7 @@
  *     can triangulate our holdings. High threat = race to complete before they
  *     strip a key card.
  *   - Team has 5/6 cards? Threat is maximum — declare soon.
- *   - On hard difficulty, threatened sets receive a +30 urgency bonus in scoring.
+ *   - On hard/expert difficulty, threatened sets receive a +30 urgency bonus.
  *
  * ─── "ALL CARDS ON TEAM" HANDLING ────────────────────────────────────────────
  * If P = 0 for all opponents in a set (all cards are provably on our team), the
@@ -54,7 +60,7 @@
  * switches to another set where opponent cards remain.
  *
  * ─── TEAMMATE SIGNALING ("ECHO ASK") ─────────────────────────────────────────
- * Bots coordinate with teammates through public asks:
+ * Bots coordinate with teammates through public asks (medium/hard/expert):
  *
  *   - After a teammate's failed ask for card C in set S, if the bot holds
  *     cards in S, it may ask for C from a DIFFERENT opponent.
@@ -63,33 +69,39 @@
  *     and the set must not be fully within our team already.
  *   - Echo asks score with a mild ×1.1 bonus for the signalling value.
  *
- * ─── TARGET SELECTION ────────────────────────────────────────────────────────
- * Given a card to ask for, the bot picks the opponent with the highest P:
+ * ─── TEMPO TRAP (expert only) ────────────────────────────────────────────────
+ * If opponent O is searching for card C (has asked for it, not received it), and
+ * the bot does not hold C but holds another card D in the same set — ask O for a
+ * DIFFERENT card E in that set.
  *
- *   - Known (P = 1): always ask the confirmed holder.
- *   - Deduced (only one eligible opponent): ask them (near-certain).
- *   - Engaged: opponent has previously asked in this set → higher prior.
- *   - Probabilistic: highest P(opponent), weighted by hand size + engagement.
- *   - Easy: uniform random among viable opponents (no probability weighting).
+ * Mechanism: O still needs C. The bot hasn't been asked about C yet. O's highest-
+ * probability next target for C is the bot. O asks the bot; bot doesn't have C;
+ * O loses their turn. Net: bot gets one ask AND triggers a wasted opponent turn.
  *
  * ─── SCORING FORMULA ─────────────────────────────────────────────────────────
- * score = pSuccess × (baseProgress + teamKnown × 8)
- *       + lockOutBonus    (almostDeclare → +50 × pSuccess)
- *       + hintBonus       (teammates working this set → up to +18)
- *       − specPenalty     (low-info blind guess → −(1−p) × 5)
- *       − leakagePenalty  (fresh set on hard → −8)
- *       + threatUrgency   (threatened set on hard → +threatLevel × 30)
- *       + endGameBonus    (small hand on hard → +pSuccess × 15)
+ * score = pSuccess × (10 + teamKnown × 8)
+ *       + lockOutBonus    (almostDeclare → +50 × pSuccess)           medium+
+ *       + hintBonus       (teammates working this set → up to +18)   medium+
+ *       − specPenalty     (low-info blind guess → −(1−p) × 5)        medium+
+ *       − leakagePenalty  (fresh set → −8)                           hard/expert
+ *       + threatUrgency   (threatened set → +threatLevel × 30)       hard/expert
+ *       + endGameBonus    (small hand → +pSuccess × 15)              hard/expert
+ *       − teamHeldPenalty (likely-team unknowns → −unknown × 6)      hard/expert
+ *       + trapBonus       (tempo trap → +P(wasted turn) × 25)        expert
  *
  * ─── DIFFICULTY LEVELS ───────────────────────────────────────────────────────
- *   easy   — probability-weighted target selection but no strategic scoring.
- *            Stays in open sets. Random viable target. No echo signalling.
+ *   easy   — full probability model. Highest-P target. Deduction. No strategic
+ *            scoring, no teammate coordination, no set restrictions.
  *
- *   medium — full odds model. Prefers sets with more team progress. Echo
- *            signalling. Skips cards known to be on own team.
+ *   medium — easy + ask-eligibility inference, immediate declares, echo asks,
+ *            strategic scoring (lockout, hint, speculative penalty). Hard-confirms
+ *            teammate set membership signals.
  *
- *   hard   — medium + leakage penalty for fresh sets. Threat urgency on
- *            exposed near-complete sets. End-game focus. Stronger echo.
+ *   hard   — medium + soft-confirm signals (aware of deceptive asks). Leakage
+ *            penalty, threat urgency, end-game focus. Deprioritises sets whose
+ *            remaining unknowns are likely with teammates.
+ *
+ *   expert — hard + opponent intent tracking + tempo trap.
  */
 
 import {
@@ -97,11 +109,14 @@ import {
   CARD_TO_SET,
   SET_DEFS,
   SET_LOOKUP,
-  type BotDifficulty,
   type Card,
   type SetKey,
   type Team,
 } from "@lit-up/shared";
+
+/** All four difficulty tiers. Defined locally so the bot compiles independently
+ *  of which version of the shared package is installed in node_modules. */
+type BotDifficulty = "easy" | "medium" | "hard" | "expert";
 import type { GameState, Player } from "./schema.js";
 import type { CardKnowledge, HandStore, Transaction, TransactionLog } from "./rules.js";
 
@@ -109,6 +124,24 @@ export type BotAction =
   | { type: "ask"; targetId: string; card: Card }
   | { type: "declare"; setKey: SetKey }
   | { type: "pass" };
+
+// ── Knowledge model types ──────────────────────────────────────────────────
+
+/** Confidence of a set-membership inference derived from ask history. */
+type ConfidenceLevel = "hard" | "soft";
+
+/**
+ * What the bot knows about a single (player, set) pair.
+ *
+ * membership — null: no evidence; "soft": player probably has ≥1 card here;
+ *              "hard": player definitely has ≥1 card here.
+ * minCount   — lower bound on how many cards this player currently holds in
+ *              the set, derived from ask-eligibility + witnessed transfers.
+ */
+interface PlayerSetInfo {
+  membership: ConfidenceLevel | null;
+  minCount: number;
+}
 
 // ── Context bundle ─────────────────────────────────────────────────────────
 
@@ -131,11 +164,21 @@ interface BotCtx {
   selfAsksInSet: Map<SetKey, number>;
   openSets: Set<SetKey>;
 
-  /**
-   * Most recent ask by a teammate (not the bot itself), used for echo
-   * detection. Null if the bot has not yet seen a teammate ask.
-   */
+  /** Most recent ask by a teammate (not the bot), used for echo detection. */
   lastTeammateAsk: Transaction | null;
+
+  /**
+   * Per-player, per-set knowledge derived from ask history.
+   * Outer key: playerId. Inner key: setKey.
+   */
+  playerSetKnowledge: Map<string, Map<SetKey, PlayerSetInfo>>;
+
+  /**
+   * Cards each opponent is actively searching for, inferred from asks.
+   * Key: opponentId. Value: cards asked for but not yet received.
+   * Used by expert tier for tempo-trap detection.
+   */
+  opponentIntents: Map<string, Set<Card>>;
 }
 
 function buildContext(
@@ -145,7 +188,7 @@ function buildContext(
   txLog: TransactionLog,
   bot: Player,
 ): BotCtx {
-  const diff = state.botDifficulty;
+  const diff = state.botDifficulty as BotDifficulty; // schema type is a superset
   const myHand = hands.get(bot.id) ?? [];
   const allPlayers = [...state.players.values()];
   const teammates = allPlayers.filter(p => p.team === bot.team && p.id !== bot.id);
@@ -163,18 +206,83 @@ function buildContext(
   const teammateAsksInSet = new Map<SetKey, number>();
   const selfAsksInSet = new Map<SetKey, number>();
   const openSets = new Set<SetKey>();
+  const playerSetKnowledge = new Map<string, Map<SetKey, PlayerSetInfo>>();
+  const opponentIntents = new Map<string, Set<Card>>();
 
-  // Walk log forward to build aggregate counts, then walk backward once to
-  // find the most recent teammate ask (O(n) total, not O(n²)).
+  // Helper: get-or-create the PlayerSetInfo for a given (player, set) pair.
+  function getSetInfo(playerId: string, setKey: SetKey): PlayerSetInfo {
+    let playerMap = playerSetKnowledge.get(playerId);
+    if (!playerMap) {
+      playerMap = new Map();
+      playerSetKnowledge.set(playerId, playerMap);
+    }
+    let info = playerMap.get(setKey);
+    if (!info) {
+      info = { membership: null, minCount: 0 };
+      playerMap.set(setKey, info);
+    }
+    return info;
+  }
+
+  // Single forward pass: aggregate ask counts, set membership, minCounts,
+  // opponent intents, and open sets all at once.
   for (const tx of txLog) {
     openSets.add(tx.setKey);
+
     if (tx.askerId === bot.id) {
       selfAsksInSet.set(tx.setKey, (selfAsksInSet.get(tx.setKey) ?? 0) + 1);
     } else if (tx.askerTeam === bot.team) {
       teammateAsksInSet.set(tx.setKey, (teammateAsksInSet.get(tx.setKey) ?? 0) + 1);
     }
+
+    // ── Set membership + minCount for the asker ──────────────────────────
+    const askerInfo = getSetInfo(tx.askerId, tx.setKey);
+
+    // Determine confidence: depends on whether asker is a teammate and bot's tier.
+    let confidence: ConfidenceLevel;
+    const askerIsTeammate = tx.askerTeam === bot.team && tx.askerId !== bot.id;
+    if (askerIsTeammate && diff === "medium") {
+      confidence = "hard"; // medium bots trust teammate signals as honest
+    } else {
+      confidence = "soft"; // opponents always soft; hard/expert aware of deception
+    }
+
+    // Only upgrade confidence, never downgrade (null → soft → hard).
+    if (
+      askerInfo.membership === null ||
+      (askerInfo.membership === "soft" && confidence === "hard")
+    ) {
+      askerInfo.membership = confidence;
+    }
+
+    // Asker had at least a base card to ask.
+    if (askerInfo.minCount < 1) askerInfo.minCount = 1;
+    // Successful ask: asker also received a card.
+    if (tx.success) askerInfo.minCount++;
+
+    // ── minCount update for the target (lost a card on success) ──────────
+    if (tx.success) {
+      const targetInfo = getSetInfo(tx.targetId, tx.setKey);
+      targetInfo.minCount = Math.max(0, targetInfo.minCount - 1);
+    }
+
+    // ── Opponent intent tracking (expert uses this for tempo trap) ────────
+    const askerIsOpponent = tx.askerTeam !== bot.team;
+    if (askerIsOpponent) {
+      let intents = opponentIntents.get(tx.askerId);
+      if (!intents) {
+        intents = new Set();
+        opponentIntents.set(tx.askerId, intents);
+      }
+      if (tx.success) {
+        intents.delete(tx.card); // intent resolved — they found the card
+      } else {
+        intents.add(tx.card); // still searching
+      }
+    }
   }
 
+  // Single backward pass to find the most recent teammate ask for echo detection.
   let lastTeammateAsk: Transaction | null = null;
   for (let i = txLog.length - 1; i >= 0; i--) {
     const tx = txLog[i];
@@ -190,6 +298,8 @@ function buildContext(
     teamCards, claimed,
     teammateAsksInSet, selfAsksInSet, openSets,
     lastTeammateAsk,
+    playerSetKnowledge,
+    opponentIntents,
   };
 }
 
@@ -214,15 +324,11 @@ export function decideBotAction(
     }
   }
 
-  // 1b. Inferred declare: a set where every card is either in teamCards/myHand
-  //     OR has P = 0 for all opponents (eliminated to teammates via ck.absent).
-  //     teamCards only tracks cards from *successful* asks; ck.absent can prove
-  //     a card is on our team without a successful ask ever happening.
-  //     Without this check the bot can deadlock: it knows all cards are on its
-  //     team but can't declare because teamCards is incomplete.
+  // 1b. Inferred declare: every card is either in teamCards/myHand OR has P = 0
+  //     for all opponents (eliminated via ck.absent). Covers cards that were never
+  //     transferred but that opponents have been fully eliminated from.
   for (const s of SET_DEFS) {
     if (ctx.claimed.has(s.key)) continue;
-    // Team must hold at least one card in the set to be allowed to declare.
     if (!s.cards.some(c => ctx.myHand.includes(c) || ctx.teamCards.has(c))) continue;
     const allOnTeam = s.cards.every(c => {
       if (ctx.myHand.includes(c) || ctx.teamCards.has(c)) return true;
@@ -232,22 +338,30 @@ export function decideBotAction(
     if (allOnTeam) return { type: "declare", setKey: s.key };
   }
 
+  // 1c. Ask-eligibility declare (medium+): a teammate's untracked base card
+  //     completes the set. analyzeSet incorporates this inference for medium+,
+  //     so canDeclare here reflects base cards that 1a/1b would miss.
+  if (ctx.diff !== "easy") {
+    for (const s of SET_DEFS) {
+      if (ctx.claimed.has(s.key)) continue;
+      if (!s.cards.some(c => ctx.myHand.includes(c) || ctx.teamCards.has(c))) continue;
+      if (analyzeSet(s.key, ctx).canDeclare) {
+        return { type: "declare", setKey: s.key };
+      }
+    }
+  }
+
   if (ctx.opponents.length === 0) return { type: "pass" };
 
   // 2. Build candidates, score, and pick the best.
   const candidates = buildCandidates(ctx);
   if (candidates.length === 0) {
-    // No scored candidate found (e.g. all known cards are on own team, but
-    // declare check above was inconclusive). Fall back to a random legal ask
-    // so the turn does not get silently skipped. A turn pass with cards in
-    // hand is never a valid game state — the bot must ask for *something*.
     const fallback = pickRandomAsk(ctx);
     if (fallback) return fallback;
     return { type: "pass" };
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  // Break ties randomly among the top-scoring group.
   const topScore = candidates[0].score;
   const top = candidates.filter(c => c.score >= topScore - 0.001);
   const pick = top[Math.floor(Math.random() * top.length)];
@@ -259,23 +373,17 @@ export function decideBotAction(
 /**
  * Returns P(each player holds this card) as a map keyed by player ID.
  * Values sum to ≤ 1 over all eligible players; 0 for eliminated / self.
- *
- * See module documentation for the full resolution algorithm.
  */
 function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
   const { ck, hands, txLog, myHand, allPlayers, bot, teamCards } = ctx;
   const setKey = CARD_TO_SET.get(card)!;
   const odds = new Map<string, number>(allPlayers.map(p => [p.id, 0]));
 
-  // We hold the card — shouldn't be called, but guard anyway.
   if (myHand.includes(card)) return odds;
-
-  // Transaction-log inference shows card is on our team; P = 0 for all opponents.
   if (teamCards.has(card)) return odds;
 
   const info = ck.get(card);
 
-  // Direct knowledge: we witnessed this card move — P = 1 for its holder.
   if (info?.holder) {
     odds.set(info.holder, 1.0);
     return odds;
@@ -283,8 +391,6 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
 
   const absent = info?.absent ?? new Set<string>();
 
-  // Count other cards in this set that are known to be with each player.
-  // Having more cards of the same set raises the prior for the remaining cards.
   const knownInSet = new Map<string, number>();
   for (const c of SET_LOOKUP[setKey].cards) {
     if (c === card) continue;
@@ -292,13 +398,11 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
     if (h) knownInSet.set(h, (knownInSet.get(h) ?? 0) + 1);
   }
 
-  // Players who have ever asked in this set (revealed they hold a base card).
   const setAskers = new Set<string>();
   for (const tx of txLog) {
     if (tx.setKey === setKey) setAskers.add(tx.askerId);
   }
 
-  // Eligible: non-absent, non-self, still has cards.
   const eligible = allPlayers.filter(
     p =>
       p.id !== bot.id &&
@@ -308,22 +412,18 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
 
   if (eligible.length === 0) return odds;
 
-  // Compute weights incorporating all evidence.
   let totalWeight = 0;
   const weights = new Map<string, number>();
 
   for (const p of eligible) {
     const handSize = Math.max(1, hands.get(p.id)?.length ?? 1);
     let w = handSize;
-    // Known-in-set bonus: each confirmed card in this set increases the prior.
     w += (knownInSet.get(p.id) ?? 0) * 5;
-    // Set-engagement bonus: player asked in this set → definitely has a base.
     if (setAskers.has(p.id)) w *= 1.8;
     weights.set(p.id, w);
     totalWeight += w;
   }
 
-  // Normalise.
   for (const p of eligible) {
     odds.set(p.id, (weights.get(p.id) ?? 0) / totalWeight);
   }
@@ -334,9 +434,9 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
 // ── Set analysis ───────────────────────────────────────────────────────────
 
 interface SetAnalysis {
-  /** Cards whose location is provably our team (self + inferred teammates). */
+  /** Cards provably on our team (explicit + inferred base cards for medium+). */
   teamKnown: number;
-  /** Cards whose location is provably the opponent team (via ck.holder). */
+  /** Cards provably on the opponent team (via ck.holder). */
   oppKnown: number;
   /** Cards with no confirmed location. */
   unknown: number;
@@ -346,17 +446,14 @@ interface SetAnalysis {
   almostDeclare: boolean;
   /** Our team has asked in this set → opponents know we have a base. */
   teamExposed: boolean;
-  /** Opponents have asked in this set → we know they have a base. */
+  /** Opponents have asked in this set → they have a base here. */
   oppExposed: boolean;
-  /**
-   * 0–1 urgency score: how much should we race to complete this set
-   * before opponents strip our cards? Combines exposure + progress.
-   */
+  /** 0–1 urgency: how much to race to complete this set before opponents do. */
   threatLevel: number;
 }
 
 function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
-  const { ck, txLog, teamCards, myHand, bot, state } = ctx;
+  const { ck, txLog, teamCards, myHand, bot, state, diff, teammates, playerSetKnowledge } = ctx;
   const set = SET_LOOKUP[setKey];
 
   let teamKnown = 0, oppKnown = 0, unknown = 0;
@@ -376,7 +473,25 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
     }
   }
 
-  const canDeclare = teamKnown === 6;
+  // Medium+: add untracked teammate base cards via ask-eligibility inference.
+  // A teammate who asked in this set held ≥1 base card; if minCount exceeds what
+  // we can account for via explicit transfers, the difference is untracked base cards.
+  if (diff !== "easy") {
+    for (const teammate of teammates) {
+      const setInfo = playerSetKnowledge.get(teammate.id)?.get(setKey);
+      if (!setInfo || setInfo.membership === null) continue;
+      // Cards in this set that are in teamCards and attributed to this teammate.
+      const alreadyTracked = set.cards.filter(c => {
+        if (!teamCards.has(c)) return false;
+        return ck.get(c)?.holder === teammate.id;
+      }).length;
+      const extra = Math.max(0, setInfo.minCount - alreadyTracked);
+      teamKnown += extra;
+      unknown = Math.max(0, unknown - extra);
+    }
+  }
+
+  const canDeclare = teamKnown >= 6;
   const almostDeclare = teamKnown === 5 && oppKnown === 0;
 
   let teamExposed = false, oppExposed = false;
@@ -387,13 +502,12 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
     if (teamExposed && oppExposed) break;
   }
 
-  // Threat: opponents can triangulate our position when both sides are engaged.
   let threatLevel = 0;
   if (teamExposed) {
     threatLevel += 0.2;
-    if (oppExposed) threatLevel += 0.3;  // opponents actively working this set
+    if (oppExposed) threatLevel += 0.3;
     if (teamKnown >= 4) threatLevel += 0.3;
-    if (almostDeclare) threatLevel += 0.2; // maximum urgency
+    if (almostDeclare) threatLevel += 0.2;
   }
 
   return {
@@ -409,7 +523,6 @@ function analyzeSet(setKey: SetKey, ctx: BotCtx): SetAnalysis {
 interface Candidate {
   card: Card;
   targetId: string;
-  /** Expected probability that the target holds this card. */
   pSuccess: number;
   score: number;
   confidence: "known" | "deduced" | "probabilistic";
@@ -422,23 +535,15 @@ function buildCandidates(ctx: BotCtx): Candidate[] {
     if (!isAskable(card, ctx)) continue;
     const setKey = CARD_TO_SET.get(card)!;
 
-    // Easy: only engage sets that have already been opened. Limits leakage
-    // while still allowing the bot to react to the game state.
-    if (ctx.diff === "easy" && !ctx.openSets.has(setKey) && ctx.openSets.size > 0) {
-      continue;
-    }
-
     const odds = computeCardOdds(card, ctx);
 
-    // Opponents with meaningful probability (> 0.1%) of holding this card.
     const viable = ctx.opponents
       .map(o => ({ player: o, p: odds.get(o.id) ?? 0 }))
       .filter(x => x.p > 0.001);
 
-    // All opponent probabilities are zero → card is on our team. Skip.
     if (viable.length === 0) continue;
 
-    // ── Exact knowledge: ck directly identifies the holder ──────────────
+    // ── Exact knowledge: confirmed holder is an opponent ─────────────────
     const info = ctx.ck.get(card);
     if (info?.holder) {
       const target = ctx.opponents.find(o => o.id === info!.holder);
@@ -453,7 +558,8 @@ function buildCandidates(ctx: BotCtx): Candidate[] {
     }
 
     // ── Deduction: single eligible opponent after all eliminations ───────
-    if (ctx.diff !== "easy" && viable.length === 1) {
+    // All difficulty levels do basic deduction — this is card-counting, not strategy.
+    if (viable.length === 1) {
       const { player, p } = viable[0];
       out.push({
         card, targetId: player.id, pSuccess: p,
@@ -463,30 +569,26 @@ function buildCandidates(ctx: BotCtx): Candidate[] {
       continue;
     }
 
-    // ── Probabilistic: best-odds target ──────────────────────────────────
-    if (ctx.diff === "easy") {
-      // Easy picks uniformly at random — no probability weighting.
-      const pick = viable[Math.floor(Math.random() * viable.length)];
-      out.push({
-        card, targetId: pick.player.id, pSuccess: pick.p,
-        score: scoreAsk(card, pick.player.id, pick.p, "probabilistic", ctx),
-        confidence: "probabilistic",
-      });
-    } else {
-      // Medium / Hard: ask the opponent most likely to hold the card.
-      const best = viable.reduce((a, b) => a.p >= b.p ? a : b);
-      out.push({
-        card, targetId: best.player.id, pSuccess: best.p,
-        score: scoreAsk(card, best.player.id, best.p, "probabilistic", ctx),
-        confidence: "probabilistic",
-      });
-    }
+    // ── Probabilistic: highest-P opponent ────────────────────────────────
+    // All difficulties pick the most probable target. Easy just scores differently.
+    const best = viable.reduce((a, b) => a.p >= b.p ? a : b);
+    out.push({
+      card, targetId: best.player.id, pSuccess: best.p,
+      score: scoreAsk(card, best.player.id, best.p, "probabilistic", ctx),
+      confidence: "probabilistic",
+    });
   }
 
-  // ── Echo ask (medium / hard only) ──────────────────────────────────────
+  // ── Echo ask (medium / hard / expert) ──────────────────────────────────
   if (ctx.diff !== "easy") {
     const echo = pickEchoAsk(ctx);
     if (echo) out.push(echo);
+  }
+
+  // ── Tempo trap (expert only) ────────────────────────────────────────────
+  if (ctx.diff === "expert") {
+    const trap = pickTempoTrap(ctx);
+    if (trap) out.push(trap);
   }
 
   return out;
@@ -495,18 +597,9 @@ function buildCandidates(ctx: BotCtx): Candidate[] {
 // ── Echo ask ───────────────────────────────────────────────────────────────
 
 /**
- * Detect whether the bot should "echo" a teammate's recent failed ask.
- *
- * Scenario: teammate asked for card C in set S and failed. The bot also
- * holds cards in S. By asking for C from a *different* opponent the bot
- * signals "I'm coordinating on set S" and simultaneously narrows down
- * where C is (another elimination if they fail again).
- *
- * Only fires when:
- *   - The teammate's last ask was a failure.
- *   - The bot itself can legally ask for the same card (has a base in set S).
- *   - A different opponent has > 15% probability of holding C.
- *   - The set is not already fully within our team (viable opponents exist).
+ * After a teammate's failed ask for card C in set S, ask for C from a DIFFERENT
+ * opponent. Signals coordination on the set and generates another elimination.
+ * The alternate target must have >15% probability of holding C.
  */
 function pickEchoAsk(ctx: BotCtx): Candidate | null {
   const { lastTeammateAsk } = ctx;
@@ -514,12 +607,10 @@ function pickEchoAsk(ctx: BotCtx): Candidate | null {
 
   const { card, targetId: prevTarget } = lastTeammateAsk;
 
-  // Bot must be able to legally ask for this card.
   if (!isAskable(card, ctx)) return null;
 
   const odds = computeCardOdds(card, ctx);
 
-  // Find an alternate target (not the one the teammate already asked).
   const altTargets = ctx.opponents
     .filter(o => o.id !== prevTarget)
     .map(o => ({ player: o, p: odds.get(o.id) ?? 0 }))
@@ -531,12 +622,86 @@ function pickEchoAsk(ctx: BotCtx): Candidate | null {
   const { player, p } = altTargets[0];
   const baseScore = scoreAsk(card, player.id, p, "probabilistic", ctx);
 
-  // Mild bonus for the signalling value of the echo.
   return {
     card, targetId: player.id, pSuccess: p,
     score: baseScore * 1.1,
     confidence: "probabilistic",
   };
+}
+
+// ── Tempo trap ─────────────────────────────────────────────────────────────
+
+/**
+ * Manufacture a wasted opponent turn.
+ *
+ * If opponent O is searching for card C in set S (asked for it, never received it),
+ * the bot does not hold C, and the bot holds card D in set S — ask O for a different
+ * card E in set S.
+ *
+ * O will eventually ask the bot for C. Since the bot doesn't have C, O loses that
+ * turn. By asking O for E first, the bot gets one ask AND sets up that wasted turn:
+ * two productive events in two turns instead of one.
+ *
+ * The trap is scored with a bonus proportional to how likely O is to target the bot
+ * for C on their next turn (fewer alternative targets → higher bonus).
+ */
+function pickTempoTrap(ctx: BotCtx): Candidate | null {
+  let bestCandidate: Candidate | null = null;
+
+  for (const opponent of ctx.opponents) {
+    const intents = ctx.opponentIntents.get(opponent.id);
+    if (!intents || intents.size === 0) continue;
+
+    for (const soughtCard of intents) {
+      // Bot must NOT hold the card the opponent is searching for.
+      if (ctx.myHand.includes(soughtCard)) continue;
+      const setKey = CARD_TO_SET.get(soughtCard)!;
+
+      // Bot must hold at least one card in this set to be eligible to ask.
+      if (!ctx.myHand.some(c => CARD_TO_SET.get(c) === setKey)) continue;
+
+      const set = SET_LOOKUP[setKey];
+
+      for (const altCard of set.cards) {
+        if (altCard === soughtCard) continue;
+        if (!isAskable(altCard, ctx)) continue;
+
+        const odds = computeCardOdds(altCard, ctx);
+        const p = odds.get(opponent.id) ?? 0;
+        if (p < 0.001) continue;
+
+        // Estimate how likely O is to ask the bot for soughtCard next turn.
+        // The fewer non-bot targets remain, the more certain O asks the bot.
+        const soughtOdds = computeCardOdds(soughtCard, ctx);
+        const otherViableTargets = ctx.allPlayers.filter(
+          pl => pl.id !== opponent.id &&
+                pl.id !== ctx.bot.id &&
+                (soughtOdds.get(pl.id) ?? 0) > 0.001,
+        ).length;
+
+        const botNotEliminated = !(ctx.ck.get(soughtCard)?.absent.has(ctx.bot.id) ?? false);
+        const totalTargets = otherViableTargets + (botNotEliminated ? 1 : 0);
+        const trapProbability = botNotEliminated && totalTargets > 0
+          ? 1 / totalTargets
+          : 0;
+
+        const trapBonus = trapProbability * 25;
+        const totalScore = scoreAsk(altCard, opponent.id, p, "probabilistic", ctx) + trapBonus;
+
+        if (!bestCandidate || totalScore > bestCandidate.score) {
+          bestCandidate = {
+            card: altCard,
+            targetId: opponent.id,
+            pSuccess: p,
+            score: totalScore,
+            confidence: "probabilistic",
+          };
+        }
+      }
+    }
+  }
+
+  return bestCandidate;
 }
 
 // ── Scoring ────────────────────────────────────────────────────────────────
@@ -552,29 +717,28 @@ function scoreAsk(
   const { diff } = ctx;
   const sa = analyzeSet(setKey, ctx);
 
-  // Base expected value: success probability × how close we are to declaring.
+  // Base: success probability × how close the team is to declaring this set.
   let s = pSuccess * (10 + sa.teamKnown * 8);
 
   if (diff === "easy") return s;
 
-  // ── Medium + Hard ────────────────────────────────────────────────────────
+  // ── Medium + ─────────────────────────────────────────────────────────────
 
-  // Lock-out: one card away from a declaration — highest leverage in the game.
+  // Lock-out: one card from a declaration — highest-leverage ask in the game.
   if (sa.almostDeclare) s += pSuccess * 50;
 
-  // Hint / support: keep working sets teammates are actively engaged in.
+  // Support: keep working sets teammates are engaged in.
   const teamAsks = ctx.teammateAsksInSet.get(setKey) ?? 0;
   s += Math.min(teamAsks, 3) * 6;
 
-  // Speculative penalty: if the set is poorly characterised and success odds
-  // are low, the ask reveals our base without gaining much.
+  // Speculative penalty: blind ask in a poorly-characterised set reveals our
+  // base without a meaningful return.
   if (sa.unknown > 2 && sa.teamKnown + sa.oppKnown < 3) {
     s -= (1 - pSuccess) * 5;
   }
 
-  if (diff === "hard") {
-    // Leakage penalty: opening a fresh set tells opponents we have cards there.
-    // Skip unless team progress is already high enough to justify the exposure.
+  if (diff === "hard" || diff === "expert") {
+    // Leakage penalty: opening a fresh set tells opponents we hold cards there.
     const setIsLive =
       (ctx.selfAsksInSet.get(setKey) ?? 0) > 0 ||
       (ctx.teammateAsksInSet.get(setKey) ?? 0) > 0;
@@ -583,8 +747,14 @@ function scoreAsk(
     // Threat urgency: race to complete sets opponents can triangulate.
     s += sa.threatLevel * 30;
 
-    // End-game: small hand means fewer turns left — maximise certainty.
+    // End-game: small hand means scarce turns — maximise certainty.
     if (ctx.myHand.length <= 3) s += pSuccess * 15;
+
+    // Deprioritise sets where remaining unknowns are likely with teammates.
+    // High team concentration + no opponent engagement → don't waste asks here.
+    if (sa.teamKnown >= 4 && !sa.oppExposed && sa.unknown > 0) {
+      s -= sa.unknown * 6;
+    }
   }
 
   return s;
@@ -593,12 +763,9 @@ function scoreAsk(
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /**
- * Last-resort random ask: iterate all cards the bot could legally ask for
- * (including sets not yet opened) and pick a random one with a random
- * eligible opponent as the target. This is called only when buildCandidates
- * returns empty, which can happen when all candidate cards are probabilistically
- * determined to be on the bot's own team but the declare checks still failed.
- * Asking randomly is always better than silently passing a turn.
+ * Last-resort random ask. Called only when buildCandidates returns empty —
+ * typically when all candidate cards are probabilistically on the bot's own
+ * team but the declare checks were inconclusive. Always better than passing.
  */
 function pickRandomAsk(ctx: BotCtx): BotAction | null {
   const askable: { card: Card; opponents: string[] }[] = [];
@@ -633,10 +800,8 @@ function isAskable(card: Card, ctx: BotCtx): boolean {
 
 /**
  * Derive team cards from public knowledge only — no peeking at actual hands.
- *
- * Replays the transaction log: add when a teammate gains a card via a
- * successful ask, remove when an opponent successfully takes it back.
- * This is the canonical "what does our team provably hold?" view.
+ * Replays the transaction log: add when a teammate gains a card, remove when
+ * an opponent takes one back.
  */
 function deriveTeamCardsFromKnowledge(
   ck: CardKnowledge,

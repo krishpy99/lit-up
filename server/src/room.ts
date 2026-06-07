@@ -502,7 +502,7 @@ export class LiteratureRoom extends Room<GameState> {
 
   private handleSetBotDifficulty(client: Client, msg: SetBotDifficultyCommand): void {
     if (!this.requireHost(client)) return;
-    if (msg?.difficulty && ["easy", "medium", "hard"].includes(msg.difficulty)) {
+    if (msg?.difficulty && ["easy", "medium", "hard", "expert"].includes(msg.difficulty)) {
       this.state.botDifficulty = msg.difficulty;
     }
   }

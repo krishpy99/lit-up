@@ -5,7 +5,7 @@
 
   let inviteCopied = $state(false);
 
-  const difficulties: BotDifficulty[] = ["easy", "medium", "hard"];
+  const difficulties: BotDifficulty[] = ["easy", "medium", "hard", "expert"];
 
   function canStart(): boolean {
     const r = game.room$;

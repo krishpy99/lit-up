@@ -9,7 +9,7 @@
 import type { Card, SetKey } from "./cards.js";
 
 // ── Bot difficulty ─────────────────────────────────────────
-export type BotDifficulty = "easy" | "medium" | "hard";
+export type BotDifficulty = "easy" | "medium" | "hard" | "expert";
 
 // ── Commands (client → server) ─────────────────────────────
 // Sent as Colyseus messages: room.send("ask", { ... }), etc.

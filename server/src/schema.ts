@@ -94,7 +94,7 @@ export class GameState extends Schema {
    *  "no recent declare" — clients check that field. */
   @type(LastDeclare) lastDeclare = new LastDeclare();
 
-  @type("string") botDifficulty: "easy" | "medium" | "hard" = "medium";
+  @type("string") botDifficulty: "easy" | "medium" | "hard" | "expert" = "medium";
 
   // ── Room config (set in the lobby, frozen once the game starts) ──
   /** Whether players can take per-opponent notes during the game. */

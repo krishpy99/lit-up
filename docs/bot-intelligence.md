@@ -99,37 +99,29 @@ the bot's perspective at decision time.
 
 | Field | Meaning |
 |---|---|
-| `teamKnown` | Cards confirmed on the bot's team (own hand + witnessed transfers to teammates + ask-eligibility inferences) |
-| `oppKnown` | Cards confirmed on the opponent team (witnessed transfers to opponents) |
-| `unknown` | Cards with no confirmed location |
-| `canDeclare` | All 6 cards are provably on the bot's team |
-| `declareProb` | Probability the team can complete this set: `teamKnown / 6`. A spectrum — 3/6 = 0.5, 5/6 ≈ 0.83, 6/6 = 1.0 (certain). Used to gate convergence avoidance at medium+ (threshold ≥ 0.5). |
-| `teamExposed` | Bot's team has asked in this set — opponents know the team holds a base |
-| `oppExposed` | Opponents have asked in this set — they hold a base here |
-| `oppConverging` | Number of distinct opponents who have ever asked in this set |
-| `contestedByAll` | Every opponent has asked in this set — the whole enemy team is hunting it |
-| `threatLevel` | 0–1 urgency score (see section 4.3) |
+| `teamCertain` | Cards provably on the bot's team via **concrete evidence only** (own hand + witnessed ask transfers + `ck.holder`). Never inflated by inference. This is the gating field for `canDeclare` and `almostDeclare`. |
+| `teamKnown` | Cards estimated on the team, including ask-eligibility inference for medium+ (may exceed `teamCertain`). Used for scoring and urgency only — **never gates a declare**. |
+| `oppKnown` | Cards provably on the opponent team (via witnessed transfers / `ck.holder`). |
+| `unknown` | Cards with no confirmed location. |
+| `canDeclare` | All 6 cards are provably on the bot's team (`teamCertain >= 6`). Based on concrete evidence only. |
+| `declareProb` | `teamKnown / 6` — scoring estimate. A spectrum — 3/6 = 0.5, 5/6 ≈ 0.83, 6/6 = 1.0 (certain). Used to gate convergence avoidance at medium+ (threshold ≥ 0.5). |
+| `teamExposed` | Bot's team has asked in this set — opponents know the team holds a base. |
+| `oppExposed` | Opponents have asked in this set — they hold a base here. |
+| `oppConverging` | Number of distinct opponents with `minCount >= 1` for this set (i.e., confirmed to hold a base card here). |
+| `contestedByAll` | Every active opponent has `minCount >= 1` for this set. |
+| `threatLevel` | 0–1 urgency score (see section 4.3). |
 
 ### Ask-eligibility inference (medium+)
 
-When a teammate successfully asks for card C in set S, the transaction log shows C
-moving to the teammate. But the teammate had to hold at least one card in set S already
-to be eligible to ask. That "base card" was never transferred — it was dealt to them —
-so it does not appear in the transaction log.
+When a teammate asks for any card in set S, the transaction log shows they must hold at
+least one card in set S already. That "base card" was dealt to them and never transferred,
+so it does not appear in the transaction log. The inference bumps `minCount` for that
+teammate, which in turn can bump `teamKnown`.
 
-The inference: teammate's ask in set S → teammate holds at least 1 additional card in
-set S beyond what explicit transfers show. This bumps `teamKnown` by 1 (or confirms a
-soft-confirmed membership as hard-confirmed) and can trigger an immediate declare when
-combined with the bot's own holdings.
-
-Example:
-- Bot holds cards 1, 2, 3, 4 of set S.
-- Teammate successfully asks opponent for card 5.
-- `teamKnown` via transfers = 5. Card 6 is unknown.
-- But teammate had to hold a base to ask for card 5. Their base is card 6.
-- Inference: card 6 is with the teammate → `teamKnown` = 6 → declare immediately.
-
-Without this inference the bot would spend turns searching for card 6 among opponents.
+**Important**: ask-eligibility inference feeds `teamKnown` (scoring) only. It never
+feeds `teamCertain` or `canDeclare`. A declare fires only when every card of a set is
+accounted for by concrete evidence (see §5). The inference is used to prioritise asks
+and score set completion probability, not to trigger declares.
 
 ---
 
@@ -329,20 +321,28 @@ exploiting what opponents are searching for.
 
 ## 5. Declare Logic
 
+**Invariant**: A declare may fire ONLY from concrete certainty. Inference (ask-eligibility
+estimates, set-engagement weights) adjusts scores and urgency but never triggers a declare.
+The bot must personally hold at least one card from the declared set (game rule).
+
 Declare checks run before any ask decision and apply at all difficulty levels.
 
 **Check 1 — direct**: every card in the set is in `teamCards` (the bot's own hand plus
-all cards confirmed on the team through explicit ask transfers). Fires immediately.
+all cards confirmed on the team through explicit ask transfers). The bot must hold at
+least one card personally. Fires immediately.
 
-**Check 2 — inferred**: every card in the set is either in `teamCards`, or has P = 0
-for all opponents (all opponents have been eliminated via failed asks). The team must
-hold at least one card in the set to be eligible to declare. This covers cards that
-were never transferred but that opponents have been fully eliminated from holding.
+**Check 2 — certainty-only inferred**: every card in the set is either in
+`teamCards`/`myHand`, OR all active opponents are concretely eliminated from holding it
+(all opponents appear in `ck.absent` for that card — established by failed asks or
+witnessed transfers). The bot must hold at least one card personally. Covers cards that
+were never transferred but that opponents have been fully eliminated from.
 
-**Check 3 — ask-eligibility** (medium+): after applying the base card inference
-(section 2), if `teamKnown` reaches 6 for any set, declare immediately. This fires
-in situations where direct and inferred checks would not yet trigger because a teammate's
-base card was never part of any ask transaction.
+**Check 3 — no-opponents**: when all active opponents have empty hands, any unclaimed
+set where the bot holds at least one card can be declared immediately. If nobody on the
+opposing team holds any cards, the bot's team trivially holds all remaining cards. This
+handles the end-game case where cards were dealt to teammates and never transferred
+(so `teamCards` and `ck.absent` are incomplete, but the team holds everything by
+elimination).
 
 **Check 4 — rescue declare** (medium+): when a `canDeclare` set exists and
 `contestedByAll = true` for another set, suppress the normal immediate declare and
@@ -353,6 +353,11 @@ card for the contested set who also has another declarable set, (2) teammate wit
 confirmed or high-probability base card for the contested set, (3) teammate with any
 declarable set, (4) random. Medium bots use confirmed-only (p = 1) for base card
 detection; hard and expert use probabilistic thresholds.
+
+Note: ask-eligibility inference is **not** a declare trigger. It is an urgency signal:
+a bot that infers a teammate holds the last card in a set will prioritise finishing that
+set (via scoring), but will only actually declare once the card appears in concrete
+evidence.
 
 ---
 

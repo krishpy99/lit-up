@@ -31,10 +31,14 @@
  *                   OR any opponent ask (can never see their difficulty level)
  *
  * ─── ASK-ELIGIBILITY INFERENCE (medium+) ─────────────────────────────────────
- * When teammate T successfully asks for card C in set S, T had to hold ≥1 base
- * card already. That base card never appeared in the transaction log. The inference
- * bumps teamKnown beyond what explicit transfers show, enabling immediate declares
- * that naive tracking misses.
+ * When a player asks for any card in set S, they must hold ≥1 card there already.
+ * That base card (dealt, never transferred) doesn't appear in the transaction log.
+ * The inference bumps `minCount` for that player, raising `teamKnown` for scoring
+ * and urgency calculations.
+ *
+ * INVARIANT: ask-eligibility inference feeds teamKnown (scoring) ONLY. It never
+ * feeds teamCertain and never triggers a declare. Only concrete evidence (witnessed
+ * transfers, ck.absent eliminations) can trigger a declare.
  *
  * ─── SET EXPOSURE & LEAKAGE ──────────────────────────────────────────────────
  * Asking in a set publicly reveals you hold at least one card there:
@@ -54,10 +58,21 @@
  *   - Team has 5/6 cards? Threat is maximum — declare soon.
  *   - On hard/expert difficulty, threatened sets receive a +30 urgency bonus.
  *
+ * ─── DECLARE CERTAINTY INVARIANT ─────────────────────────────────────────────
+ * A declare fires ONLY from concrete certainty. Three concrete paths:
+ *   1a. All 6 cards in `teamCards` (own hand + witnessed ask transfers).
+ *   1b. All 6 cards either in `teamCards` or with all opponents in `ck.absent`.
+ *   1c. All opponents have empty hands — the bot's team holds everything by
+ *       elimination (handles dealt-but-never-transferred cards at end-game).
+ *
+ * The bot must personally hold at least one card from the set (game rule).
+ * Ask-eligibility inference ONLY affects scoring; it never triggers a declare.
+ *
  * ─── "ALL CARDS ON TEAM" HANDLING ────────────────────────────────────────────
- * If P = 0 for all opponents in a set (all cards are provably on our team), the
- * bot generates no candidate for that set. It waits for a teammate to declare or
- * switches to another set where opponent cards remain.
+ * If all remaining cards of a set are provably on our team but the declare
+ * checks haven't fired yet (e.g. not all opponents are in ck.absent), the bot
+ * generates no candidates for that set (no opponent to ask). It continues with
+ * other sets. The declare fires once certainty is established.
  *
  * ─── TEAMMATE SIGNALING ("ECHO ASK") ─────────────────────────────────────────
  * Bots coordinate with teammates through public asks (medium/hard/expert):

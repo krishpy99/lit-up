@@ -110,9 +110,9 @@
  *
  * ─── SCORING FORMULA ─────────────────────────────────────────────────────────
  * score = pSuccess² × (10 + teamKnown × 8)                          all tiers
- *       − openPenalty     (fresh set → coldness×4/×5, or            all tiers
+ *       − openPenalty     (fresh set → 0 on easy, coldness×5 on medium,
  *                          coldness×(1−p)×22 on hard/expert)
- *       − convergence     (capped: min(oppConv×3,6)×declareProb)    medium+
+ *       − convergence     (capped: min(oppConv×3,6)×declareProb)    hard/expert
  *       − dangerTarget    (opponent chasing our card → −8)          medium+
  *       + threatUrgency   (threatened set → +threatLevel × 30)      hard/expert
  *       + endGameBonus    (small hand → +pSuccess × 15)             hard/expert
@@ -121,19 +121,20 @@
  *   (coldness = max(0, 4 − teamKnown))
  *
  * ─── DIFFICULTY LEVELS ───────────────────────────────────────────────────────
- *   easy   — full probability model + information-economy spine (certainty
- *            preference, fresh-set avoidance). Highest-P target, deduction.
- *            No teammate coordination, no opponent modelling, no tactics.
+ *   easy   — noisy probability model (22% forget rate, 12% random asks, no
+ *            fresh-set penalty). Information leaks freely. No opponent modelling,
+ *            no teammate coordination, no tactics.
  *
- *   medium — easy + ask-eligibility inference, gated echo asks, convergence
- *            avoidance, dangerous-target avoidance. Hard-confirms teammate set
- *            membership signals.
+ *   medium — clean probability model (15% forget) + ask-eligibility inference,
+ *            gated echo asks, dangerous-target avoidance. No convergence avoidance.
  *
- *   hard   — medium + soft-confirm signals (aware of deceptive asks). Leakage
- *            penalty, threat urgency, end-game focus. Deprioritises sets whose
- *            remaining unknowns are likely with teammates.
+ *   hard   — medium (3% forget, 2.0× engagement) + convergence avoidance
+ *            (threshold ≥ 2 opponents), threat urgency, end-game focus, investment
+ *            bonus, almostDeclare urgency.
  *
- *   expert — hard + opponent intent tracking + tempo trap.
+ *   expert — hard (0% forget, 4.0× engagement) + opponent intent tracking,
+ *            tempo trap, leakage exploitation (+28 bonus for sets opponents have
+ *            opened), intelligent post-declare pass.
  */
 
 import {
@@ -426,9 +427,19 @@ export function decideBotAction(
   //     positioned teammate. Pass when a teammate has more known cards in a
   //     nearly-completable set than we can exploit in one ask, signalling that
   //     giving them the turn is higher EV than asking ourselves.
+  // 1e. Expert post-declare pass: after a successful declare (postDeclareId
+  //     is this bot), decide whether to keep the turn or hand it to a better-
+  //     positioned teammate.
   if (ctx.diff === "expert" && state.postDeclareId === bot.id) {
     const passTarget = pickIntelligentPassTarget(ctx);
     if (passTarget) return { type: "pass", toPlayerId: passTarget };
+  }
+
+  // 2. Easy: 15% of the time skip scoring entirely and pick randomly.
+  //    This simulates inexperienced play: wrong target, wrong card, no planning.
+  if (ctx.diff === "easy" && Math.random() < 0.12) {
+    const randomAction = pickRandomAsk(ctx);
+    if (randomAction) return randomAction;
   }
 
   // 2. Build candidates, score, and pick the best.
@@ -487,8 +498,9 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
   if (myHand.includes(card)) return odds;
   if (teamCards.has(card)) return odds;
 
-  // Easy bot: 5% chance to forget any individual piece of known information.
-  const forget = ctx.diff === "easy" && Math.random() < 0.05;
+  // forget rate: easy = 22% (noisy), medium = 15%, hard = 3%, expert = 0%
+  const forgetRate = ctx.diff === "easy" ? 0.22 : ctx.diff === "medium" ? 0.15 : ctx.diff === "hard" ? 0.03 : 0;
+  const forget = forgetRate > 0 && Math.random() < forgetRate;
 
   const info = forget ? undefined : ck.get(card);
 
@@ -522,10 +534,13 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
     const handSize = Math.max(1, hands.get(p.id)?.length ?? 1);
     let w = handSize;
     w += (knownInSet.get(p.id) ?? 0) * 5;
-    // Apply set-engagement bonus for any player with confirmed set membership
-    // (hard or soft). Hard = certain; soft = probable. Both justify the bonus.
+    // Apply set-engagement bonus: player has confirmed set membership, so
+    // they're more likely to hold remaining unknown cards in that set.
+    // Expert uses a stronger prior (2.5×) for more accurate targeting.
     const psi = ctx.playerSetKnowledge.get(p.id)?.get(setKey);
-    if (psi && psi.membership !== null) w *= 1.8;
+    if (psi && psi.membership !== null) {
+      w *= ctx.diff === "expert" ? 4.0 : ctx.diff === "hard" ? 2.0 : 1.8;
+    }
     weights.set(p.id, w);
     totalWeight += w;
   }
@@ -836,7 +851,9 @@ function pickTempoTrap(ctx: BotCtx): Candidate | null {
 
         const odds = computeCardOdds(altCard, ctx);
         const p = odds.get(opponent.id) ?? 0;
-        if (p < 0.001) continue;
+        // Only set up the trap when the ask itself is high-probability —
+        // a low-p trap ask is strictly worse than a better regular ask elsewhere.
+        if (p < 0.45) continue;
 
         // Estimate how likely O is to ask the bot for soughtCard next turn.
         // The fewer non-bot targets remain, the more certain O asks the bot.
@@ -853,7 +870,7 @@ function pickTempoTrap(ctx: BotCtx): Candidate | null {
           ? 1 / totalTargets
           : 0;
 
-        const trapBonus = trapProbability * 15;
+        const trapBonus = trapProbability * 8;
         const totalScore = scoreAsk(altCard, opponent.id, p, "probabilistic", ctx) + trapBonus;
 
         if (!bestCandidate || totalScore > bestCandidate.score) {
@@ -993,8 +1010,8 @@ function pickIntelligentPassTarget(ctx: BotCtx): string | null {
     if (r > bestScore) { bestScore = r; bestId = t.id; }
   }
 
-  // Only pass if the teammate's readiness clearly exceeds the bot's.
-  if (bestId && bestScore > botReadiness + 4) return bestId;
+  // Only pass if the teammate's readiness strongly exceeds the bot's.
+  if (bestId && bestScore > botReadiness + 15) return bestId;
   return null;
 }
 
@@ -1102,7 +1119,7 @@ function scoreAsk(
     const coldness = Math.max(0, 4 - sa.teamKnown); // 0 when teamKnown >= 4
     let openPenalty: number;
     if (diff === "easy") {
-      openPenalty = coldness * 4;
+      openPenalty = 0;  // easy opens fresh sets freely, leaking set membership
     } else if (diff === "medium") {
       openPenalty = coldness * 5;
     } else {
@@ -1128,7 +1145,7 @@ function scoreAsk(
   // our set. Capped so it never overcrowds the certainty-based base score.
   // Only active when the set is both likely ours (declareProb >= 0.5) and
   // at least one opponent is actively engaged there.
-  if (sa.oppConverging > 0 && sa.declareProb >= 0.5 && pSuccess < 1.0) {
+  if ((diff === "hard" || diff === "expert") && sa.oppConverging > 1 && sa.declareProb >= 0.5 && pSuccess < 1.0) {
     s -= Math.min(sa.oppConverging * 3, 6) * sa.declareProb;
   }
 
@@ -1143,7 +1160,9 @@ function scoreAsk(
 
   if (diff === "hard" || diff === "expert") {
     // Threat urgency: race to complete sets opponents can triangulate.
-    s += sa.threatLevel * 30;
+    // Expert is more aggressive: higher multiplier to react earlier.
+    const threatMult = diff === "expert" ? 50 : 30;
+    s += sa.threatLevel * threatMult;
 
     // End-game: small hand means scarce turns — maximise certainty.
     if (ctx.myHand.length <= 3) s += pSuccess * 15;
@@ -1152,6 +1171,52 @@ function scoreAsk(
     // High team concentration + no opponent engagement → don't waste asks here.
     if (sa.teamKnown >= 4 && !sa.oppExposed && sa.unknown > 0) {
       s -= sa.unknown * 6;
+    }
+
+    // Personal investment: reward finishing sets where the bot holds many cards.
+    // Fresh-set multiplier is 0.1 (not 0.2) so the investment bonus never
+    // overrides the leakage penalty on fresh sets.
+    const botCardsInSet = ctx.myHand.filter(c => CARD_TO_SET.get(c) === setKey).length;
+    const investBonus = diff === "expert" ? 10 : 7;
+    s += botCardsInSet * investBonus * (setIsOpen ? 1.0 : 0.1);
+
+    // Almost-declare urgency: team has 5 confirmed cards — one ask away.
+    // Expert chases the last card aggressively (even at p=0.3) since winning a
+    // full set is extremely high EV. Hard is more conservative (needs p>0.46).
+    if (sa.almostDeclare) {
+      const almostBonus = diff === "expert" ? 60 : 25;
+      s += pSuccess * almostBonus;
+    }
+
+    // Near-complete racing (expert only): when teamCertain >= 4, the team is
+    // 1-2 cards from completion — expert races these sets more urgently.
+    // This fires earlier and more often than almostDeclare, creating a
+    // consistent advantage over hard throughout the late-midgame.
+    if (diff === "expert" && sa.teamCertain >= 4 && !sa.almostDeclare && setIsOpen) {
+      s += pSuccess * 20;
+    }
+
+    // Leakage exploitation: when opponents have asked in this set (revealed
+    // their base), expert scores a bonus for extracting cards from that
+    // exposed set. Easy bots open many sets (high openSets coverage), so
+    // this fires far more often against easy than against disciplined hard bots.
+    if (diff === "expert" && ctx.openSets.has(setKey)) {
+      s += pSuccess * 28;
+    }
+
+    // Opponent safety (expert only): penalize giving turns to opponents who are
+    // actively building sets. Unlike isDangerousTarget (medium+, specific card),
+    // this is broad — any opponent with minCount >= 2 in any set is a threat.
+    if (diff === "expert" && pSuccess < 1.0) {
+      const targetSets = ctx.playerSetKnowledge.get(targetId);
+      if (targetSets) {
+        let targetDanger = 0;
+        for (const [sk, info] of targetSets) {
+          if (ctx.claimed.has(sk)) continue;
+          if (info.minCount >= 3) targetDanger += info.minCount - 2;
+        }
+        s -= targetDanger * 4;
+      }
     }
   }
 

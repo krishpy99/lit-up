@@ -357,6 +357,15 @@ function simApplyPass(state: AnyState, hands: HandStore, passerId: string, toId?
 
 // ── Simulation run ───────────────────────────────────────────────────────────
 
+interface LeakageStats {
+  /** Total fresh-set opens (first ask in a set when neither team had asked before). */
+  freshSetOpens: number;
+  /** Total distinct sets the bot asked in across the game. */
+  distinctSetsAsked: number;
+  /** Total asks made. */
+  totalAsks: number;
+}
+
 interface SimResult {
   terminated: boolean;
   turns: number;
@@ -364,10 +373,71 @@ interface SimResult {
   winner: string;
   staleDetected: boolean;
   wedgeLog?: string;
+  /** Leakage stats per player id. */
+  leakage: Map<string, LeakageStats>;
+  /** Difficulty per player id (for mixed-tier games). */
+  playerDiffs: Map<string, BotDifficulty>;
 }
 
-function runGame(diff: BotDifficulty): SimResult {
-  const { state, hands, ck, txLog } = buildGame(diff);
+/**
+ * Build a game where team A uses diffA and team B uses diffB.
+ * Returns the state, hands, ck, txLog, and a per-player difficulty map.
+ */
+function buildMixedGame(diffA: BotDifficulty, diffB: BotDifficulty): {
+  state: AnyState;
+  hands: HandStore;
+  ck: CardKnowledge;
+  txLog: TransactionLog;
+  playerDiffs: Map<string, BotDifficulty>;
+} {
+  // Use diffA as the default state difficulty (will be swapped per turn).
+  const state = buildState(diffA);
+  const ids = ["p1", "p2", "p3", "p4", "p5", "p6"];
+  const teams: Team[] = ["A", "B", "A", "B", "A", "B"];
+  const playerDiffs = new Map<string, BotDifficulty>();
+
+  ids.forEach((id, i) => {
+    const team = teams[i];
+    state.players.set(id, {
+      id, name: `Bot${i + 1}`, avatar: "#aaa", character: "",
+      team, isBot: true, isHost: i === 0, connected: true, cardCount: 0,
+    });
+    playerDiffs.set(id, team === "A" ? diffA : diffB);
+  });
+
+  const hands: HandStore = new Map();
+  const deck = shuffle([...ALL_CARDS]);
+  deck.forEach((card, i) => {
+    const id = ids[i % ids.length];
+    const hand = hands.get(id) ?? [];
+    hand.push(card);
+    hands.set(id, hand);
+  });
+  ids.forEach((id) => {
+    state.players.get(id)!.cardCount = (hands.get(id) ?? []).length;
+  });
+
+  state.turnId = ids[Math.floor(Math.random() * ids.length)];
+  state.hostId = ids[0];
+
+  return { state, hands, ck: newKnowledge(), txLog: [], playerDiffs };
+}
+
+function runGame(diffA: BotDifficulty, diffB?: BotDifficulty): SimResult {
+  const effectiveDiffB = diffB ?? diffA;
+  const { state, hands, ck, txLog, playerDiffs } = buildMixedGame(diffA, effectiveDiffB);
+
+  // Leakage tracking.
+  const leakage = new Map<string, LeakageStats>();
+  for (const id of state.players.keys()) {
+    leakage.set(id, { freshSetOpens: 0, distinctSetsAsked: 0, totalAsks: 0 });
+  }
+  // Track which sets each player has asked in.
+  const playerSetsAsked = new Map<string, Set<SetKey>>();
+  for (const id of state.players.keys()) playerSetsAsked.set(id, new Set());
+  // Track which sets have been opened (first ask in the set by either team).
+  const globalOpenSets = new Set<SetKey>();
+
   let turns = 0;
   let prevTurnId = "";
   let sameTurnCount = 0;
@@ -391,8 +461,9 @@ function runGame(diff: BotDifficulty): SimResult {
       }
       if (sameTurnCount > 50) {
         return {
-          terminated: false, turns, diff, winner: "", staleDetected: true,
+          terminated: false, turns, diff: diffA, winner: "", staleDetected: true,
           wedgeLog: `Turn stuck on ${currentTurnId} for ${sameTurnCount} steps`,
+          leakage, playerDiffs,
         };
       }
     } else {
@@ -402,16 +473,37 @@ function runGame(diff: BotDifficulty): SimResult {
 
     const bot = state.players.get(currentTurnId);
     if (!bot) {
-      // Shouldn't happen.
       const next = simFindNext(state, hands, currentTurnId);
       if (next) state.turnId = next;
       continue;
     }
 
+    // Swap state.botDifficulty to this player's individual difficulty before deciding.
+    const origDiff = state.botDifficulty;
+    state.botDifficulty = playerDiffs.get(bot.id) ?? diffA;
+
     // Cast to GameState shape — structural compatibility only.
     const action = decideBotAction(state as any, hands, ck, txLog, bot as any);
 
+    state.botDifficulty = origDiff;
+
     if (action.type === "ask") {
+      const { card } = action;
+      const setKey = CARD_TO_SET.get(card as Card)!;
+
+      // Track leakage before applying the ask.
+      const botLeakage = leakage.get(bot.id)!;
+      botLeakage.totalAsks++;
+      if (!globalOpenSets.has(setKey)) {
+        botLeakage.freshSetOpens++;
+      }
+      const botSetsAsked = playerSetsAsked.get(bot.id)!;
+      if (!botSetsAsked.has(setKey)) {
+        botSetsAsked.add(setKey);
+        botLeakage.distinctSetsAsked++;
+      }
+      globalOpenSets.add(setKey);
+
       const err = simApplyAsk(state, hands, ck, txLog, bot.id, action.targetId, action.card);
       if (err && VERBOSE) console.log(`[sim] ask err: ${err}`);
       if (err) {
@@ -463,28 +555,43 @@ function runGame(diff: BotDifficulty): SimResult {
 
   return {
     terminated: state.status === "ended",
-    turns, diff, winner: state.winnerTeam,
+    turns, diff: diffA, winner: state.winnerTeam,
     staleDetected: false,
+    leakage, playerDiffs,
   };
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log(`Running ${GAMES} simulated games, MAX_TURNS=${MAX_TURNS}…`);
   const t0 = Date.now();
+
+  // ── Phase 1: Homogeneous games (all same diff) — termination + leakage ──
+  console.log(`\n=== Phase 1: Homogeneous games (${GAMES} total, termination + leakage) ===`);
 
   let passed = 0, failed = 0;
   const failures: SimResult[] = [];
-  const statsByDiff = new Map<BotDifficulty, { count: number; totalTurns: number; stale: number }>();
+
+  interface DiffStats {
+    count: number; totalTurns: number; stale: number;
+    totalFreshOpens: number; totalDistinctSets: number; totalAsks: number;
+  }
+  const statsByDiff = new Map<BotDifficulty, DiffStats>();
 
   for (let i = 0; i < GAMES; i++) {
     const diff = DIFFICULTIES[i % DIFFICULTIES.length];
     const result = runGame(diff);
-    const s = statsByDiff.get(diff) ?? { count: 0, totalTurns: 0, stale: 0 };
+    const s = statsByDiff.get(diff) ?? { count: 0, totalTurns: 0, stale: 0, totalFreshOpens: 0, totalDistinctSets: 0, totalAsks: 0 };
     s.count++;
     s.totalTurns += result.turns;
     if (result.staleDetected) s.stale++;
+
+    // Aggregate leakage across all players in this game.
+    for (const [, lk] of result.leakage) {
+      s.totalFreshOpens += lk.freshSetOpens;
+      s.totalDistinctSets += lk.distinctSetsAsked;
+      s.totalAsks += lk.totalAsks;
+    }
     statsByDiff.set(diff, s);
 
     if (result.terminated && !result.staleDetected) {
@@ -497,11 +604,17 @@ async function main() {
     }
   }
 
-  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(`\nResults: ${passed} passed, ${failed} failed out of ${GAMES} games in ${elapsed}s.\n`);
-  console.log("Average turns by difficulty:");
+  const elapsed1 = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`\nResults: ${passed} passed, ${failed} failed out of ${GAMES} games in ${elapsed1}s.\n`);
+  console.log("Leakage + performance by difficulty:");
+  console.log(`  ${"diff".padEnd(8)} ${"avg turns".padStart(9)} ${"stale".padStart(5)} ${"fresh/game".padStart(10)} ${"sets/game".padStart(9)} ${"asks/game".padStart(9)}`);
   for (const [diff, s] of statsByDiff) {
-    console.log(`  ${diff.padEnd(8)} avg=${Math.round(s.totalTurns / s.count).toString().padStart(4)} turns  stale=${s.stale}  (${s.count} games)`);
+    const gamesCount = s.count;
+    const avgTurns = Math.round(s.totalTurns / gamesCount);
+    const freshPerGame = (s.totalFreshOpens / gamesCount).toFixed(1);
+    const setsPerGame = (s.totalDistinctSets / gamesCount).toFixed(1);
+    const asksPerGame = (s.totalAsks / gamesCount).toFixed(1);
+    console.log(`  ${diff.padEnd(8)} ${avgTurns.toString().padStart(9)} ${s.stale.toString().padStart(5)} ${freshPerGame.padStart(10)} ${setsPerGame.padStart(9)} ${asksPerGame.padStart(9)}`);
   }
 
   if (failures.length > 0) {
@@ -510,6 +623,72 @@ async function main() {
   }
 
   console.log("\nAll games terminated — no hangs detected.");
+
+  // ── Phase 2: Mixed-tier head-to-head ─────────────────────────────────────
+  const MIXED_GAMES_PER_MATCHUP = Math.max(40, Math.floor(GAMES / 10));
+  console.log(`\n=== Phase 2: Mixed-tier head-to-head (${MIXED_GAMES_PER_MATCHUP} games per matchup) ===`);
+
+  // win[diffA][diffB] = wins for team A (diffA) when facing team B (diffB).
+  const wins = new Map<BotDifficulty, Map<BotDifficulty, number>>();
+  const totals = new Map<BotDifficulty, Map<BotDifficulty, number>>();
+  for (const da of DIFFICULTIES) {
+    wins.set(da, new Map(DIFFICULTIES.map(db => [db, 0])));
+    totals.set(da, new Map(DIFFICULTIES.map(db => [db, 0])));
+  }
+
+  interface MatchupLeakage {
+    freshOpens: number; distinctSets: number; asks: number; count: number;
+  }
+  const leakageByDiff = new Map<BotDifficulty, MatchupLeakage>(
+    DIFFICULTIES.map(d => [d, { freshOpens: 0, distinctSets: 0, asks: 0, count: 0 }]),
+  );
+
+  for (const diffA of DIFFICULTIES) {
+    for (const diffB of DIFFICULTIES) {
+      for (let g = 0; g < MIXED_GAMES_PER_MATCHUP; g++) {
+        const result = runGame(diffA, diffB);
+        totals.get(diffA)!.set(diffB, (totals.get(diffA)!.get(diffB) ?? 0) + 1);
+        if (result.winner === "A") {
+          wins.get(diffA)!.set(diffB, (wins.get(diffA)!.get(diffB) ?? 0) + 1);
+        }
+        // Attribute leakage to each player's own difficulty.
+        for (const [playerId, lk] of result.leakage) {
+          const d = result.playerDiffs.get(playerId)!;
+          const ml = leakageByDiff.get(d)!;
+          ml.freshOpens += lk.freshSetOpens;
+          ml.distinctSets += lk.distinctSetsAsked;
+          ml.asks += lk.totalAsks;
+          ml.count++;
+        }
+      }
+    }
+  }
+
+  // Print win rate table.
+  const colW = 9;
+  const hdr = "teamA\\B  " + DIFFICULTIES.map(d => d.padStart(colW)).join("");
+  console.log("\nWin rate for team A (rows) vs team B (cols):");
+  console.log(hdr);
+  for (const da of DIFFICULTIES) {
+    const row = da.padEnd(8) + " " + DIFFICULTIES.map(db => {
+      const w = wins.get(da)!.get(db) ?? 0;
+      const t = totals.get(da)!.get(db) ?? 1;
+      return `${Math.round(100 * w / t)}%`.padStart(colW);
+    }).join("");
+    console.log(row);
+  }
+
+  // Print per-difficulty leakage in mixed games.
+  console.log("\nLeakage per player across mixed games:");
+  console.log(`  ${"diff".padEnd(8)} ${"freshOpens/game".padStart(15)} ${"distSets/game".padStart(13)} ${"asks/game".padStart(9)}`);
+  for (const d of DIFFICULTIES) {
+    const ml = leakageByDiff.get(d)!;
+    const n = ml.count || 1;
+    console.log(`  ${d.padEnd(8)} ${(ml.freshOpens / n).toFixed(2).padStart(15)} ${(ml.distinctSets / n).toFixed(2).padStart(13)} ${(ml.asks / n).toFixed(2).padStart(9)}`);
+  }
+
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`\nTotal elapsed: ${elapsed}s`);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

@@ -82,7 +82,10 @@
  *   - This signals: "I also have cards in this set — let's coordinate."
  *   - Condition: the alternate target must have > 15% probability of holding C,
  *     and the set must not be fully within our team already.
- *   - Echo asks score with a mild ×1.1 bonus for the signalling value.
+ *   - GATED one-off (not a default): only fires when the team is already
+ *     information-rich in the set (teamCertain ≥ 4) AND the set is already
+ *     team-exposed, so the marginal leakage is ~free. No score bonus — the gate
+ *     itself ensures the ask is already strong.
  *
  * ─── TEMPO TRAP (expert only) ────────────────────────────────────────────────
  * If opponent O is searching for card C (has asked for it, not received it), and
@@ -92,24 +95,39 @@
  * Mechanism: O still needs C. The bot hasn't been asked about C yet. O's highest-
  * probability next target for C is the bot. O asks the bot; bot doesn't have C;
  * O loses their turn. Net: bot gets one ask AND triggers a wasted opponent turn.
+ * GATED identically to the echo ask (teamCertain ≥ 4 AND team-exposed) so the
+ * trap never opens a fresh set on speculation.
+ *
+ * ─── INFORMATION ECONOMY (the spine — ALL tiers) ─────────────────────────────
+ * Every ask publicly reveals "I hold a base in this set." The game is an
+ * information-differential war: prefer asks whose expected gain beats their
+ * leakage cost. Two mechanisms, applied at every tier including easy:
+ *   - pSuccess is SQUARED in the base score, so certainty gates everything — no
+ *     stack of additive bonuses lets a speculative ask win.
+ *   - Opening a FRESH set (neither team has asked there) is penalised unless the
+ *     team already holds ≥4 there; already-open sets carry no penalty, so the bot
+ *     naturally finds open cards first and only opens new fronts when invested.
  *
  * ─── SCORING FORMULA ─────────────────────────────────────────────────────────
- * score = pSuccess × (10 + teamKnown × 8)
- *       + hintBonus       (teammates working this set → up to +18)   medium+
- *       − specPenalty     (low-info blind guess → −(1−p) × 5)        medium+
- *       − leakagePenalty  (fresh set → −8)                           hard/expert
- *       + threatUrgency   (threatened set → +threatLevel × 30)       hard/expert
- *       + endGameBonus    (small hand → +pSuccess × 15)              hard/expert
- *       − teamHeldPenalty (likely-team unknowns → −unknown × 6)      hard/expert
- *       + trapBonus       (tempo trap → +P(wasted turn) × 25)        expert
+ * score = pSuccess² × (10 + teamKnown × 8)                          all tiers
+ *       − openPenalty     (fresh set → coldness×4/×5, or            all tiers
+ *                          coldness×(1−p)×22 on hard/expert)
+ *       − convergence     (capped: min(oppConv×3,6)×declareProb)    medium+
+ *       − dangerTarget    (opponent chasing our card → −8)          medium+
+ *       + threatUrgency   (threatened set → +threatLevel × 30)      hard/expert
+ *       + endGameBonus    (small hand → +pSuccess × 15)             hard/expert
+ *       − teamHeldPenalty (likely-team unknowns → −unknown × 6)     hard/expert
+ *       + trapBonus       (gated tempo trap → +P(wasted turn) × 15) expert
+ *   (coldness = max(0, 4 − teamKnown))
  *
  * ─── DIFFICULTY LEVELS ───────────────────────────────────────────────────────
- *   easy   — full probability model. Highest-P target. Deduction. No strategic
- *            scoring, no teammate coordination, no set restrictions.
+ *   easy   — full probability model + information-economy spine (certainty
+ *            preference, fresh-set avoidance). Highest-P target, deduction.
+ *            No teammate coordination, no opponent modelling, no tactics.
  *
- *   medium — easy + ask-eligibility inference, immediate declares, echo asks,
- *            strategic scoring (lockout, hint, speculative penalty). Hard-confirms
- *            teammate set membership signals.
+ *   medium — easy + ask-eligibility inference, gated echo asks, convergence
+ *            avoidance, dangerous-target avoidance. Hard-confirms teammate set
+ *            membership signals.
  *
  *   hard   — medium + soft-confirm signals (aware of deceptive asks). Leakage
  *            penalty, threat urgency, end-game focus. Deprioritises sets whose
@@ -726,6 +744,13 @@ function buildCandidates(ctx: BotCtx): Candidate[] {
 /**
  * After a teammate's failed ask for card C in set S, ask for C from a DIFFERENT
  * opponent. Signals coordination on the set and generates another elimination.
+ *
+ * GATE: only fires when the team is already information-rich in this set
+ * (teamCertain >= 4) AND the set is already team-exposed. This ensures the
+ * marginal leakage from the echo ask is ~free — the set is already open and
+ * nearly complete. Without the gate the echo ask opens fresh sets on speculation,
+ * which is exactly the leakage we want to avoid.
+ *
  * The alternate target must have >15% probability of holding C.
  */
 function pickEchoAsk(ctx: BotCtx): Candidate | null {
@@ -733,8 +758,13 @@ function pickEchoAsk(ctx: BotCtx): Candidate | null {
   if (!lastTeammateAsk || lastTeammateAsk.success) return null;
 
   const { card, targetId: prevTarget } = lastTeammateAsk;
+  const setKey = CARD_TO_SET.get(card)!;
 
   if (!isAskable(card, ctx)) return null;
+
+  // Gate: only echo when near-complete AND already exposed.
+  const sa = analyzeSet(setKey, ctx);
+  if (sa.teamCertain < 4 || !sa.teamExposed) return null;
 
   const odds = computeCardOdds(card, ctx);
 
@@ -751,7 +781,7 @@ function pickEchoAsk(ctx: BotCtx): Candidate | null {
 
   return {
     card, targetId: player.id, pSuccess: p,
-    score: baseScore * 1.1,
+    score: baseScore,  // no bonus — the gate ensures this is already a strong ask
     confidence: "probabilistic",
   };
 }
@@ -769,8 +799,14 @@ function pickEchoAsk(ctx: BotCtx): Candidate | null {
  * turn. By asking O for E first, the bot gets one ask AND sets up that wasted turn:
  * two productive events in two turns instead of one.
  *
- * The trap is scored with a bonus proportional to how likely O is to target the bot
- * for C on their next turn (fewer alternative targets → higher bonus).
+ * GATE: only fires when the team is information-rich in the relevant set
+ * (teamCertain >= 4) AND the set is already team-exposed. This ensures:
+ *   1. The marginal leakage is ~free (set already open, nearly complete).
+ *   2. We're not speculating on a cold set for a minor tactical gain.
+ *   3. The bonus only adds value on top of an already-strong ask.
+ *
+ * The trap is scored with a bonus proportional to how likely O is to target the
+ * bot for C on their next turn (fewer alternative targets → higher bonus).
  */
 function pickTempoTrap(ctx: BotCtx): Candidate | null {
   let bestCandidate: Candidate | null = null;
@@ -786,6 +822,11 @@ function pickTempoTrap(ctx: BotCtx): Candidate | null {
 
       // Bot must hold at least one card in this set to be eligible to ask.
       if (!ctx.myHand.some(c => CARD_TO_SET.get(c) === setKey)) continue;
+
+      // Gate: only run the trap when the team is near-complete AND already exposed.
+      // Without this gate the trap opens fresh sets speculatively, leaking our base.
+      const sa = analyzeSet(setKey, ctx);
+      if (sa.teamCertain < 4 || !sa.teamExposed) continue;
 
       const set = SET_LOOKUP[setKey];
 
@@ -812,7 +853,7 @@ function pickTempoTrap(ctx: BotCtx): Candidate | null {
           ? 1 / totalTargets
           : 0;
 
-        const trapBonus = trapProbability * 25;
+        const trapBonus = trapProbability * 15;
         const totalScore = scoreAsk(altCard, opponent.id, p, "probabilistic", ctx) + trapBonus;
 
         if (!bestCandidate || totalScore > bestCandidate.score) {
@@ -1029,42 +1070,78 @@ function scoreAsk(
   const { diff } = ctx;
   const sa = analyzeSet(setKey, ctx);
 
-  // Base: success probability × how close the team is to declaring this set.
-  let s = pSuccess * (10 + sa.teamKnown * 8);
+  // ── Information-economy spine (ALL tiers) ────────────────────────────────
+  //
+  // Principle: every ask publicly reveals "I hold a base in this set." The
+  // game is an information-differential war. We prefer asks whose expected
+  // gain outweighs the leakage cost.
+  //
+  // pSuccess is SQUARED so certainty gates the whole score. A 0.3-p ask
+  // scores 0.09× what a certain ask would — no stack of additive bonuses
+  // can let it win. A 0.95-p ask scores 0.90× — nearly full value.
+  let s = pSuccess * pSuccess * (10 + sa.teamKnown * 8);
+
+  // Fresh-set leakage: opening a set that neither team has asked in yet
+  // reveals our base card. The penalty is zero for already-open sets.
+  //
+  // At easy/medium: flat penalty scaled by how cold the set is.
+  //   Penalty = max(0, 4 - teamKnown) × tierWeight
+  //   If teamKnown >= 4: no penalty (investment justifies opening).
+  //
+  // At hard/expert: penalty also scales with (1 - pSuccess) so a
+  //   high-certainty ask in a fresh set is tolerated, but a speculative
+  //   ask (low p) in a cold set scores very low.
+  //   Penalty = max(0, 4 - teamKnown) × (1 - pSuccess) × tierWeight
+  //
+  // Applied at ALL tiers so even easy bots prefer already-open sets.
+  const setIsOpen =
+    (ctx.selfAsksInSet.get(setKey) ?? 0) > 0 ||
+    (ctx.teammateAsksInSet.get(setKey) ?? 0) > 0 ||
+    ctx.openSets.has(setKey); // opponents have asked in it — already exposed
+  if (!setIsOpen) {
+    const coldness = Math.max(0, 4 - sa.teamKnown); // 0 when teamKnown >= 4
+    let openPenalty: number;
+    if (diff === "easy") {
+      openPenalty = coldness * 4;
+    } else if (diff === "medium") {
+      openPenalty = coldness * 5;
+    } else {
+      // hard/expert: also multiplied by (1 - pSuccess): speculative opens are
+      // far costlier; near-certain opens in a cold set are still penalised but
+      // tolerable if the ask is almost guaranteed.
+      openPenalty = coldness * (1 - pSuccess) * 22;
+    }
+    s -= openPenalty;
+  }
 
   if (diff === "easy") return s;
 
   // ── Medium + ─────────────────────────────────────────────────────────────
 
-  // Support: keep working sets teammates are engaged in.
-  const teamAsks = ctx.teammateAsksInSet.get(setKey) ?? 0;
-  s += Math.min(teamAsks, 3) * 6;
+  // No explicit teammate-support bonus: the information-economy spine already
+  // rewards sets with higher teamKnown (which reflect teammate engagement via
+  // ask-eligibility inference). An additive bonus on top of this would
+  // over-weight sets that teammates worked, potentially pulling medium toward
+  // sub-optimal asks. teamKnown in the base formula handles coordination.
 
-  // Speculative penalty: blind ask in a poorly-characterised set reveals our
-  // base without a meaningful return.
-  if (sa.unknown > 2 && sa.teamKnown + sa.oppKnown < 3) {
-    s -= (1 - pSuccess) * 5;
-  }
-
-  // Convergence avoidance: deprioritise handing turns to opponents racing for our set.
+  // Convergence avoidance: mild penalty for handing turns to opponents racing
+  // our set. Capped so it never overcrowds the certainty-based base score.
+  // Only active when the set is both likely ours (declareProb >= 0.5) and
+  // at least one opponent is actively engaged there.
   if (sa.oppConverging > 0 && sa.declareProb >= 0.5 && pSuccess < 1.0) {
-    s -= sa.oppConverging * 10 * sa.declareProb;
+    s -= Math.min(sa.oppConverging * 3, 6) * sa.declareProb;
   }
 
-  // Dangerous opponent avoidance: penalise asking a target who is searching
-  // for a card already confirmed on our team. Giving them a turn lets them
-  // immediately chase that card. No penalty when we know we'll succeed (pSuccess === 1).
+  // Dangerous opponent avoidance: mild penalty for asking a target who is
+  // actively searching for a card confirmed on our team. The penalty is
+  // smaller than before so it steers away from poor targets without
+  // completely blocking asks that are otherwise good.
+  // No penalty when pSuccess === 1 (we succeed, no turn is handed over).
   if (pSuccess < 1.0 && isDangerousTarget(targetId, card, ctx)) {
-    s -= 20;
+    s -= 8;
   }
 
   if (diff === "hard" || diff === "expert") {
-    // Leakage penalty: opening a fresh set tells opponents we hold cards there.
-    const setIsLive =
-      (ctx.selfAsksInSet.get(setKey) ?? 0) > 0 ||
-      (ctx.teammateAsksInSet.get(setKey) ?? 0) > 0;
-    if (!setIsLive && sa.teamKnown < 4) s -= 8;
-
     // Threat urgency: race to complete sets opponents can triangulate.
     s += sa.threatLevel * 30;
 

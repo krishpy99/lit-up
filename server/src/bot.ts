@@ -329,8 +329,11 @@ export function decideBotAction(
   const ctx = buildContext(state, hands, ck, txLog, bot);
 
   // 1a. Declare when teamCards (derived from successful asks) confirms all 6.
+  //     Guard: the bot must personally hold at least one card from the set
+  //     (game rule: the declarer must hold a base card to be eligible).
   for (const s of SET_DEFS) {
     if (ctx.claimed.has(s.key)) continue;
+    if (!ctx.myHand.some(c => s.cards.includes(c))) continue; // must hold a base
     if (s.cards.every(c => ctx.teamCards.has(c))) {
       botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", path: "1a-direct", setKey: s.key });
       return { type: "declare", setKey: s.key };
@@ -342,10 +345,10 @@ export function decideBotAction(
   //     ck.absent — failed asks or witnessed transfers). This covers cards that
   //     were never transferred but that opponents have been fully eliminated from.
   //     INVARIANT: only fires from concrete evidence in ck; inference never gates a
-  //     declare. The team must hold at least one card in the set to be eligible.
+  //     declare. The bot must personally hold a card (same rule as path 1a).
   for (const s of SET_DEFS) {
     if (ctx.claimed.has(s.key)) continue;
-    if (!s.cards.some(c => ctx.myHand.includes(c) || ctx.teamCards.has(c))) continue;
+    if (!ctx.myHand.some(c => s.cards.includes(c))) continue; // must hold a base
     const allCertain = s.cards.every(c => {
       // Confirmed on team via transaction log.
       if (ctx.myHand.includes(c) || ctx.teamCards.has(c)) return true;
@@ -359,8 +362,21 @@ export function decideBotAction(
     }
   }
 
+  // 1c. No-opponents declare: when all opponents are empty (no cards), any unclaimed
+  //     set where the bot holds a card must have all its remaining cards on the bot's
+  //     team (there's nobody else to hold them). Declare immediately.
+  //     This covers the end-game case where cards were dealt to teammates and never
+  //     transferred (so teamCards and ck.absent are incomplete), but the team
+  //     trivially holds everything because the other team is exhausted.
   if (ctx.opponents.length === 0) {
-    botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "pass", reason: "no-opponents" });
+    for (const s of SET_DEFS) {
+      if (ctx.claimed.has(s.key)) continue;
+      if (ctx.myHand.some(c => s.cards.includes(c))) {
+        botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", path: "1c-no-opponents", setKey: s.key });
+        return { type: "declare", setKey: s.key };
+      }
+    }
+    botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "pass", reason: "no-opponents-no-declarable" });
     return { type: "pass" };
   }
 

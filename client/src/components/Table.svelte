@@ -55,7 +55,19 @@
     };
   }
 
-  let youIndex = $derived(you ? room.players.findIndex((p) => p.id === you.id) : 0);
+  // Interleave teams so no two same-team players sit adjacent on the table.
+  let displayPlayers = $derived.by(() => {
+    const teamA = room.players.filter(p => p.team === "A");
+    const teamB = room.players.filter(p => p.team === "B");
+    const result: typeof room.players = [];
+    const len = Math.max(teamA.length, teamB.length);
+    for (let i = 0; i < len; i++) {
+      if (i < teamA.length) result.push(teamA[i]);
+      if (i < teamB.length) result.push(teamB[i]);
+    }
+    return result;
+  });
+  let youIndex = $derived(you ? displayPlayers.findIndex((p) => p.id === you.id) : 0);
 </script>
 
 <div class="game-arena">
@@ -88,9 +100,9 @@
   {/if}
 
   <div class="seats">
-    {#each room.players as player, i (player.id)}
+    {#each displayPlayers as player, i (player.id)}
       {#if !you || player.id !== you.id}
-        {@const pos = seatPosition(i, room.players.length, youIndex)}
+        {@const pos = seatPosition(i, displayPlayers.length, youIndex)}
         <Seat
           {player}
           {room}

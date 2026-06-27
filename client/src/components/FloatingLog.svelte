@@ -93,7 +93,7 @@
       <span>Action log</span>
       <button class="log-close" onclick={toggle} aria-label="Close log">×</button>
     </header>
-    {#if room.actions.length > 10}
+    {#if room.defaultLogCount === 0 && actions.length > 10}
     <div class="log-filter-strip">
       <!-- Level 1: All + suit chips + Joker -->
       <button

@@ -179,6 +179,9 @@ interface BotCtx {
    * Used by expert tier for tempo-trap detection.
    */
   opponentIntents: Map<string, Set<Card>>;
+
+  /** Belt-and-suspenders absent tracking derived directly from the txLog. */
+  txKnownAbsent: Map<Card, Set<string>>;
 }
 
 function buildContext(
@@ -292,6 +295,19 @@ function buildContext(
     }
   }
 
+  const txKnownAbsent = new Map<Card, Set<string>>();
+  for (const tx of txLog) {
+    let s = txKnownAbsent.get(tx.card);
+    if (!s) { s = new Set(); txKnownAbsent.set(tx.card, s); }
+    s.add(tx.askerId);
+    if (tx.success) {
+      s.add(tx.targetId);
+      s.delete(tx.askerId);
+    } else {
+      s.add(tx.targetId);
+    }
+  }
+
   return {
     state, hands, ck, txLog, bot, diff,
     myHand, allPlayers, teammates, opponents,
@@ -300,6 +316,7 @@ function buildContext(
     lastTeammateAsk,
     playerSetKnowledge,
     opponentIntents,
+    txKnownAbsent,
   };
 }
 
@@ -385,8 +402,12 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
   const info = ck.get(card);
 
   if (info?.holder) {
-    odds.set(info.holder, 1.0);
-    return odds;
+    const txAbsentEarly = ctx.txKnownAbsent.get(card) ?? new Set<string>();
+    if (!txAbsentEarly.has(info.holder)) {
+      odds.set(info.holder, 1.0);
+      return odds;
+    }
+    // Holder is in txKnownAbsent — ck is stale; fall through to probabilistic.
   }
 
   const absent = info?.absent ?? new Set<string>();
@@ -403,10 +424,12 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
     if (tx.setKey === setKey) setAskers.add(tx.askerId);
   }
 
+  const txAbsent = ctx.txKnownAbsent.get(card) ?? new Set<string>();
   const eligible = allPlayers.filter(
     p =>
       p.id !== bot.id &&
       !absent.has(p.id) &&
+      !txAbsent.has(p.id) &&
       (hands.get(p.id)?.length ?? 0) > 0,
   );
 
@@ -548,12 +571,15 @@ function buildCandidates(ctx: BotCtx): Candidate[] {
     if (info?.holder) {
       const target = ctx.opponents.find(o => o.id === info!.holder);
       if (target) {
-        out.push({
-          card, targetId: target.id, pSuccess: 1.0,
-          score: scoreAsk(card, target.id, 1.0, "known", ctx),
-          confidence: "known",
-        });
-        continue;
+        const txAbsent = ctx.txKnownAbsent.get(card) ?? new Set<string>();
+        if (!txAbsent.has(target.id)) {
+          out.push({
+            card, targetId: target.id, pSuccess: 1.0,
+            score: scoreAsk(card, target.id, 1.0, "known", ctx),
+            confidence: "known",
+          });
+          continue;
+        }
       }
     }
 
@@ -776,8 +802,9 @@ function pickRandomAsk(ctx: BotCtx): BotAction | null {
     if (ctx.claimed.has(setKey)) continue;
     if (ctx.myHand.includes(card)) continue;
     if (!ctx.myHand.some(c => CARD_TO_SET.get(c) === setKey)) continue;
+    const cardAbsent = ctx.ck.get(card)?.absent ?? new Set<string>();
     const eligibleOpponents = ctx.opponents
-      .filter(o => (ctx.hands.get(o.id) ?? []).length > 0)
+      .filter(o => (ctx.hands.get(o.id) ?? []).length > 0 && !cardAbsent.has(o.id))
       .map(o => o.id);
     if (eligibleOpponents.length === 0) continue;
     askable.push({ card, opponents: eligibleOpponents });

@@ -53,7 +53,7 @@ lit-up/
 * **Schema** (`server/src/schema.ts`) — only public fields (no hands).
 * **Bot AI** (`server/src/bot.ts`) — four tiers (easy → expert). Each bot only knows what it *remembers* of the public asks (memory fades by tier), declares from its beliefs (so it can get them wrong), and picks among good moves with weighted randomness. `playBotTurn` is the single entry point used by the room and the sim.
 * **Disconnects** — the seat flips to autopilot in place (same hand, same turn order) and flips back on reconnect. Grace window: `LIT_RECONNECT_GRACE_S` (default 300).
-* **Checks** — `npm run test:integration -w server`, `npm run sim -w server` (bot-only games: hang detection + win-rate matrix), `npm run smoke -w server` (against a running server).
+* **Checks** — `npm test -w server` (bot strategy), `npm run test:integration -w server`, `npm run sim -w server` (bot-only games: hang detection + win-rate matrix), `npm run smoke -w server` (against a running server).
 
 ### Client
 

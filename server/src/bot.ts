@@ -118,6 +118,12 @@
  *       + endGameBonus    (small hand → +pSuccess × 15)             hard/expert
  *       − teamHeldPenalty (likely-team unknowns → −unknown × 6)     hard/expert
  *       + trapBonus       (gated tempo trap → +P(wasted turn) × 15) expert
+ *       − lock            ((1−p) × lockDanger(target) × 3|5)       medium+
+ *       − quietAsk        (opp holds ≥3 of set → (1−p) × oppKnown × 3) medium+
+ *
+ * A finished set is held in reserve (medium+) and declared when the best ask
+ * is < 0.9 likely, the hand is small, or 15% at random; right after declaring
+ * with no ask ≥ 0.5 likely, the bot passes to a teammate.
  *   (coldness = max(0, 4 − teamKnown))
  *
  * ─── DIFFICULTY LEVELS ───────────────────────────────────────────────────────
@@ -429,6 +435,7 @@ export function decideBotAction(
   //    set is provably on our team; easy gets rash and guesses the last card.
   // Easy is occasionally rash: 15% of the time it'll gamble on 5 known cards.
   const rash = ctx.diff === "easy" && Math.random() < 0.15 ? 5 : 6;
+  let ready: BotAction | null = null;
   for (const s of SET_DEFS) {
     if (ctx.claimed.has(s.key)) continue;
     if (!ctx.myHand.some(c => s.cards.includes(c))) continue; // must hold a base
@@ -436,10 +443,12 @@ export function decideBotAction(
     // a person would declare here too rather than ask forever.
     const { assignments, certain, onTeam } = locateSet(s.key, ctx);
     if (assignments && (certain >= rash || onTeam)) {
-      botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", certain, setKey: s.key });
-      return { type: "declare", setKey: s.key, assignments };
+      botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare-ready", certain, setKey: s.key });
+      ready = { type: "declare", setKey: s.key, assignments };
+      break;
     }
   }
+  if (ready && (ctx.diff === "easy" || ctx.opponents.length === 0)) return ready;
 
   // No opponent has cards: every remaining card is on our team, so we must
   // declare — guessing who holds what where memory doesn't say.
@@ -483,6 +492,25 @@ export function decideBotAction(
 
   // 2. Build candidates, score, and pick the best.
   const candidates = buildCandidates(ctx);
+  const bestP = Math.max(0, ...candidates.map(c => c.pSuccess));
+
+  // 3. Hold a finished set in reserve (medium+). Nobody on the other team
+  //    holds a card of it, so nobody can take it; declaring keeps our turn,
+  //    so cash it in only when our best ask might hand the turn over, near
+  //    the end, or now and then so the habit isn't readable.
+  if (ready && (bestP < 0.9 || ctx.myHand.length <= 4 || Math.random() < 0.15)) return ready;
+
+  // 4. Just declared and nothing safe to ask: pass within the team rather
+  //    than give the other side the turn on a guess.
+  if (state.postDeclareId === bot.id && bestP < 0.5) {
+    const mates = ctx.teammates.filter(t => (hands.get(t.id) ?? []).length > 0);
+    if (mates.length > 0) {
+      const most = Math.max(...mates.map(t => t.cardCount));
+      const pool = mates.filter(t => t.cardCount === most);
+      return { type: "pass", toPlayerId: pool[Math.floor(Math.random() * pool.length)].id };
+    }
+  }
+
   if (candidates.length === 0) {
     const fallback = pickRandomAsk(ctx);
     if (fallback) return fallback;
@@ -763,13 +791,16 @@ function buildCandidates(ctx: BotCtx): Candidate[] {
     }
 
     // ── Probabilistic: highest-P opponent ────────────────────────────────
-    // All difficulties pick the most probable target. Easy just scores differently.
+    // Easy only sees the most probable target; medium+ weighs every target
+    // so the lock penalty can steer it to a safer opponent.
     const best = viable.reduce((a, b) => a.p >= b.p ? a : b);
-    out.push({
-      card, targetId: best.player.id, pSuccess: best.p,
-      score: scoreAsk(card, best.player.id, best.p, "probabilistic", ctx),
-      confidence: "probabilistic",
-    });
+    for (const { player, p } of ctx.diff === "easy" ? [best] : viable) {
+      out.push({
+        card, targetId: player.id, pSuccess: p,
+        score: scoreAsk(card, player.id, p, "probabilistic", ctx),
+        confidence: "probabilistic",
+      });
+    }
   }
 
   // ── Echo ask (medium / hard / expert) ──────────────────────────────────
@@ -1107,6 +1138,33 @@ function isDangerousTarget(targetId: string, card: Card, ctx: BotCtx): boolean {
   return false;
 }
 
+/**
+ * Lock danger: how much `targetId` could take from us if handed the turn.
+ * Sum over sets our team mostly owns of P(target holds a missing card) ×
+ * our cards there. Cached per decision since every candidate asks it.
+ */
+const lockCache = new WeakMap<BotCtx, Map<string, number>>();
+function lockDanger(targetId: string, ctx: BotCtx): number {
+  let cache = lockCache.get(ctx);
+  if (!cache) lockCache.set(ctx, (cache = new Map()));
+  const hit = cache.get(targetId);
+  if (hit !== undefined) return hit;
+  let danger = 0;
+  for (const s of SET_DEFS) {
+    if (ctx.claimed.has(s.key)) continue;
+    const { teamKnown } = analyzeSet(s.key, ctx);
+    if (teamKnown < 3) continue;
+    let p = 0;
+    for (const c of s.cards) {
+      if (ctx.myHand.includes(c) || ctx.teamCards.has(c)) continue;
+      p = Math.max(p, computeCardOdds(c, ctx).get(targetId) ?? 0);
+    }
+    danger += p * teamKnown;
+  }
+  cache.set(targetId, danger);
+  return danger;
+}
+
 // ── Scoring ────────────────────────────────────────────────────────────────
 
 function scoreAsk(
@@ -1189,6 +1247,15 @@ function scoreAsk(
   // No penalty when pSuccess === 1 (we succeed, no turn is handed over).
   if (pSuccess < 1.0 && isDangerousTarget(targetId, card, ctx)) {
     s -= 8;
+  }
+
+  if (pSuccess < 1.0) {
+    // Lock: never hand the turn, on a guess, to an opponent who holds the
+    // missing card of a set we mostly own — they'd ask us for the rest.
+    s -= (1 - pSuccess) * lockDanger(targetId, ctx) * (diff === "medium" ? 3 : 5);
+    // Quiet asks: in a set the other side already mostly holds, a failed ask
+    // just tells them where our card is and which ones are left.
+    if (sa.oppKnown >= 3) s -= (1 - pSuccess) * sa.oppKnown * 3;
   }
 
   if (diff === "hard" || diff === "expert") {

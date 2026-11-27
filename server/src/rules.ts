@@ -396,9 +396,13 @@ export function applyDeclare(
       }
     }
   } else {
-    // Failed declare: turn advances normally.
+    // Failed declare: the turn passes to the other team (any player with
+    // cards if that team is out).
     state.postDeclareId = "";
-    ensureValidTurn(state, hands);
+    state.turnId =
+      findNextPlayerWithCards(state, hands, declarerId, otherTeam(declarer.team as Team)) ??
+      findNextPlayerWithCards(state, hands, declarerId) ??
+      state.turnId;
   }
   return null;
 }

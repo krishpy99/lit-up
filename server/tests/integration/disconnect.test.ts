@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { Server } from "@colyseus/core";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import { boot, ColyseusTestServer } from "@colyseus/testing";
-import { LiteratureRoom } from "../../src/room.js";
+import { CLOSE_REPLACED, LiteratureRoom } from "../../src/room.js";
 import type { GameState } from "../../src/schema.js";
 import type { Room as ClientRoom } from "colyseus.js";
 
@@ -90,6 +90,11 @@ async function buildGame(colyseus: ColyseusTestServer): Promise<
   return players;
 }
 
+/** The server-side seat secret (the real client gets it in "welcome"). */
+function secretOf(room: LiteratureRoom, playerId: string): string {
+  return (room as any).seatSecrets.get(playerId);
+}
+
 // ── Suite ─────────────────────────────────────────────────────────────────────
 
 describe("disconnect integration", () => {
@@ -150,11 +155,15 @@ describe("disconnect integration", () => {
 
     const reconnected = await colyseus.sdk.joinById<GameState>(roomId, {
       name: "Bob",
-      reconnectToken: victim.playerId,
+      playerId: victim.playerId,
+      reconnectToken: secretOf(serverRoom, victim.playerId),
     });
-    const handMsg = new Promise<string[]>((resolve) =>
-      reconnected.onMessage("hand", (m: { hand: string[] }) => resolve(m.hand)),
-    );
+    // Registered synchronously after the join resolves, so it can't miss the
+    // message; the timeout turns any regression into a failure, not a hang.
+    const handMsg = new Promise<string[]>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("no hand within 2s")), 2000);
+      reconnected.onMessage("hand", (m: { hand: string[] }) => { clearTimeout(t); resolve(m.hand); });
+    });
     reconnected.onMessage("*", () => {});
 
     await waitFor(() => serverRoom.state.players.get(victim.playerId)?.connected === true, 3000);
@@ -166,6 +175,83 @@ describe("disconnect integration", () => {
 
     reconnected.leave(true);
     for (const { room } of [host, c, d]) room.leave(true);
+  });
+
+  // ── Seat secrets ────────────────────────────────────────────────────────────
+
+  it("refuses to hand a seat to someone without its secret", async () => {
+    const [host, victim, c, d] = await buildGame(colyseus);
+    const serverRoom = colyseus.getRoomById<GameState>(host.room.roomId) as LiteratureRoom;
+    forceClose(victim.room);
+    await waitFor(() => serverRoom.state.players.get(victim.playerId)?.connected === false, 2000);
+
+    await assert.rejects(
+      colyseus.sdk.joinById(host.room.roomId, { name: "Bob", playerId: victim.playerId, reconnectToken: victim.playerId }),
+    );
+    assert.equal(serverRoom.state.players.get(victim.playerId)!.isBot, true, "seat stays on autopilot");
+    for (const { room } of [host, c, d]) room.leave(true);
+  });
+
+  it("lets the owner take over a seat the server still thinks is connected", async () => {
+    const [host, victim, c, d] = await buildGame(colyseus);
+    const serverRoom = colyseus.getRoomById<GameState>(host.room.roomId) as LiteratureRoom;
+    let oldCloseCode: number | null = null;
+    victim.room.onLeave((code) => { oldCloseCode = code; });
+    const again = await colyseus.sdk.joinById<GameState>(host.room.roomId, {
+      name: "Bob",
+      playerId: victim.playerId,
+      reconnectToken: secretOf(serverRoom, victim.playerId),
+    });
+    again.onMessage("*", () => {});
+
+    // The old tab is told it was replaced (so it won't auto-rejoin and loop)…
+    await waitFor(() => oldCloseCode !== null, 2000);
+    assert.equal(oldCloseCode, CLOSE_REPLACED);
+    // …and its close, processed after the takeover, doesn't bench the seat.
+    await new Promise((r) => setTimeout(r, 200));
+    const seat = serverRoom.state.players.get(victim.playerId)!;
+    assert.equal(serverRoom.state.players.size, 4);
+    assert.equal(seat.connected, true);
+    assert.equal(seat.isBot, false);
+    assert.equal((serverRoom as any).sessionIdToPlayerId.get(again.sessionId), victim.playerId);
+    again.leave(true);
+    for (const { room } of [host, c, d]) room.leave(true);
+  });
+
+  it("keeps teams as they were when someone leaves the end screen", async () => {
+    const [host, b, c, d] = await buildGame(colyseus);
+    const serverRoom = colyseus.getRoomById<GameState>(host.room.roomId) as LiteratureRoom;
+    serverRoom.state.status = "ended";
+    const teamsBefore = new Map([...serverRoom.state.players.values()].map((p) => [p.id, p.team]));
+    b.room.leave(true);
+    await waitFor(() => !serverRoom.state.players.has(b.playerId), 2000);
+    for (const p of serverRoom.state.players.values()) {
+      assert.equal(p.team, teamsBefore.get(p.id), `${p.name} kept their team`);
+    }
+    for (const { room } of [host, c, d]) room.leave(true);
+  });
+
+  it("passes the turn to the other team after a failed declare", async () => {
+    const [host, b, c, d] = await buildGame(colyseus);
+    const serverRoom = colyseus.getRoomById<GameState>(host.room.roomId) as LiteratureRoom;
+    const { applyDeclare } = await import("../../src/rules.js");
+    const { SET_DEFS } = await import("@lit-up/shared");
+    const hands: Map<string, string[]> = (serverRoom as any).hands;
+    const state = serverRoom.state;
+    // Declarer holds one card of the set; an opponent holds the other five,
+    // so claiming all six for the declarer is guaranteed wrong.
+    const set = SET_DEFS[0];
+    const declarer = state.players.get(host.playerId)!;
+    const opp = [...state.players.values()].find((p) => p.team !== declarer.team)!;
+    for (const [id, h] of hands) hands.set(id, h.filter((card) => !set.cards.includes(card)));
+    hands.get(declarer.id)!.push(set.cards[0]);
+    hands.get(opp.id)!.push(...set.cards.slice(1));
+    const wrong: Record<string, string> = {};
+    for (const card of set.cards) wrong[card] = declarer.id;
+    state.turnId = declarer.id;
+    assert.equal(applyDeclare(state, hands as any, declarer.id, set.key, wrong), null);
+    assert.notEqual(state.players.get(state.turnId)!.team, declarer.team, "turn moved to the other team");
+    for (const { room } of [host, b, c, d]) room.leave(true);
   });
 
   // ── Test 3: stale declare guard ────────────────────────────────────────────

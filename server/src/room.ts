@@ -5,6 +5,7 @@
  * pushed privately to their owners via the "hand" message.
  */
 
+import { randomUUID } from "node:crypto";
 import { Room, type Client } from "@colyseus/core";
 import {
   AVATAR_CHARACTERS,
@@ -83,8 +84,15 @@ function getNextBotName(state: GameState): string {
   return BOT_NAMES[botCount % BOT_NAMES.length];
 }
 
+/** Close code for a socket replaced by the same player opening the game
+ *  elsewhere (another tab/device). Clients must not auto-rejoin on it. */
+export const CLOSE_REPLACED = 4001;
+
 export class LiteratureRoom extends Room<GameState> {
   override maxClients = MAX_PLAYERS;
+  // We dispose ourselves: an all-bots game must survive its humans dropping
+  // for the grace window so they can rejoin (see disposeIfAbandoned).
+  override autoDispose = false;
 
   /** Server-only: each player's hand. Never goes into the schema. */
   private hands: HandStore = new Map();
@@ -92,8 +100,16 @@ export class LiteratureRoom extends Room<GameState> {
   /** Server-only: full transaction log for richer bot inference. */
   private transactions: TransactionLog = [];
 
-  /** Player ids → reconnection tokens (sessionId from Colyseus). */
+  /** Colyseus sessionId → playerId. */
   private sessionIdToPlayerId = new Map<string, string>();
+
+  /** Server-only secret per human seat, sent once in "welcome". Rejoining a
+   *  seat requires it; it's revoked on a deliberate leave or grace expiry. */
+  private seatSecrets = new Map<string, string>();
+
+  /** Bumped on every drop/restore of a seat, so a grace timer from an older
+   *  drop can tell it is stale and must not revoke the seat. */
+  private seatEpoch = new Map<string, number>();
 
   private botTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -101,6 +117,8 @@ export class LiteratureRoom extends Room<GameState> {
     this.setState(new GameState());
     this.state.code = generateRoomCode();
     this.roomId = this.state.code;
+    // A created room whose creator never connects shouldn't linger.
+    this.clock.setTimeout(() => this.disposeIfAbandoned(), 60_000);
 
     this.onMessage("ask", (client, msg: AskCommand) => this.handleAsk(client, msg));
     this.onMessage("declare", (client, msg: DeclareCommand) => this.handleDeclare(client, msg));
@@ -128,11 +146,18 @@ export class LiteratureRoom extends Room<GameState> {
     if (!name) throw new Error("Name required.");
     if (!this.state.status.match(/^(lobby|playing)$/)) throw new Error("Room is not accepting players.");
 
-    // ── Reconnect: restore a disconnected player ─────────────────
-    if (options.reconnectToken && this.state.status === "playing") {
-      const existingPlayer = this.state.players.get(options.reconnectToken);
-      if (existingPlayer && !existingPlayer.connected && existingPlayer.name === name) {
-        this.restoreSeat(options.reconnectToken, client);
+    // ── Reconnect: reclaim a seat with its secret ────────────────
+    // Also covers a client that noticed the drop before the server did
+    // (seat still "connected"): the new socket takes over from the old one.
+    if (options.playerId && options.reconnectToken && this.state.status === "playing") {
+      const secret = this.seatSecrets.get(options.playerId);
+      if (secret && secret === options.reconnectToken && this.state.players.has(options.playerId)) {
+        for (const [sid, pid] of this.sessionIdToPlayerId) {
+          if (pid !== options.playerId) continue;
+          this.sessionIdToPlayerId.delete(sid); // old socket's onLeave becomes a no-op
+          this.clients.find((c) => c.sessionId === sid)?.leave(CLOSE_REPLACED);
+        }
+        this.restoreSeat(options.playerId, client);
         return;
       }
     }
@@ -152,7 +177,7 @@ export class LiteratureRoom extends Room<GameState> {
     const player = new Player();
     player.id = playerId;
     player.name = name;
-    player.avatar = options.avatar || pickFreeAvatar(this.state);
+    player.avatar = sanitizeAvatar(options.avatar) || pickFreeAvatar(this.state);
     player.character = sanitizeCharacter(options.character);
     player.team = this.state.players.size % 2 === 0 ? "A" : "B";
     player.isHost = this.state.players.size === 0;
@@ -169,23 +194,30 @@ export class LiteratureRoom extends Room<GameState> {
       this.state.turnId = playerId;
     }
 
+    this.seatSecrets.set(playerId, randomUUID());
     pushAction(this.state, `${name} joined.`);
-    client.send("welcome", { playerId, roomCode: this.state.code });
+    this.sendWelcome(client, playerId);
     this.sendHand(client);
   }
 
-  override async onLeave(client: Client, consented?: boolean): Promise<void> {
+  override onLeave(client: Client, consented?: boolean): void {
+    this.handleLeave(client, !!consented);
+    this.disposeIfAbandoned();
+  }
+
+  private handleLeave(client: Client, consented: boolean): void {
     const playerId = this.sessionIdToPlayerId.get(client.sessionId);
     if (!playerId) return;
     const player = this.state.players.get(playerId);
     if (!player) return;
 
-    // In lobby, leaving is permanent and team is reshuffled.
-    if (this.state.status === "lobby") {
+    // Outside a game, leaving is permanent. Teams re-balance only in the
+    // lobby, never under the end-screen result.
+    if (this.state.status !== "playing") {
       this.removePlayer(playerId);
       pushAction(this.state, `${player.name} left.`);
       this.maybePromoteHost();
-      assignTeams(this.state);
+      if (this.state.status === "lobby") assignTeams(this.state);
       return;
     }
 
@@ -197,24 +229,43 @@ export class LiteratureRoom extends Room<GameState> {
       if (pid === playerId) this.sessionIdToPlayerId.delete(sid);
     }
     this.maybePromoteHost();
-    this.scheduleBot();
+    // Only kick the scheduler if it's this seat's turn; otherwise leave any
+    // pending (animation-paced) bot timer alone.
+    if (this.state.turnId === playerId) this.scheduleBot();
 
     if (consented) {
+      this.seatSecrets.delete(playerId); // left on purpose: seat is the bot's now
       pushAction(this.state, `${player.name} left. A bot is playing their hand.`);
       return;
     }
     pushAction(this.state, `${player.name} disconnected. A bot is playing until they're back.`);
 
-    // Native Colyseus reconnect (same sessionId). Rejoin-by-token in onJoin
-    // also works; whichever comes first restores the seat. After the grace
-    // period the bot simply keeps playing — the hand stays in the game.
-    try {
-      const back = await this.allowReconnection(client, RECONNECT_GRACE_S);
-      const p = this.state.players.get(playerId);
-      if (p && !p.connected) this.restoreSeat(playerId, back);
-    } catch {
-      /* grace period expired — autopilot continues */
+    // They can rejoin by secret (onJoin) for the grace window; after that the
+    // bot keeps the seat for good. The epoch makes a timer from an earlier
+    // drop harmless once they have come back and dropped again. (No
+    // allowReconnection: the client always rejoins by secret, and its
+    // reserved seats would pile up and lock the room.)
+    const epoch = (this.seatEpoch.get(playerId) ?? 0) + 1;
+    this.seatEpoch.set(playerId, epoch);
+    this.clock.setTimeout(() => {
+      if (this.seatEpoch.get(playerId) !== epoch) return;
+      if (this.state.players.get(playerId)?.connected === false) this.seatSecrets.delete(playerId);
+    }, RECONNECT_GRACE_S * 1000);
+  }
+
+  /**
+   * Nobody connected: a lobby or finished room goes now; a live game waits
+   * out the grace window so dropped players can still rejoin it.
+   */
+  private disposeIfAbandoned(): void {
+    if (this.clients.length > 0) return;
+    if (this.state.status !== "playing") {
+      void this.disconnect();
+      return;
     }
+    this.clock.setTimeout(() => {
+      if (this.clients.length === 0) void this.disconnect();
+    }, RECONNECT_GRACE_S * 1000);
   }
 
   /** Hand a seat that's on autopilot back to its human. */
@@ -222,14 +273,24 @@ export class LiteratureRoom extends Room<GameState> {
     const p = this.state.players.get(playerId)!;
     p.connected = true;
     p.isBot = false;
+    this.seatEpoch.set(playerId, (this.seatEpoch.get(playerId) ?? 0) + 1);
     this.sessionIdToPlayerId.set(client.sessionId, playerId);
     if (this.state.turnId === playerId && this.botTimer) {
       clearTimeout(this.botTimer); // the human takes their own turn
       this.botTimer = null;
     }
+    this.maybePromoteHost();
     pushAction(this.state, `${p.name} reconnected.`);
-    client.send("welcome", { playerId, roomCode: this.state.code });
+    this.sendWelcome(client, playerId);
     this.sendHand(client);
+  }
+
+  private sendWelcome(client: Client, playerId: string): void {
+    client.send("welcome", {
+      playerId,
+      roomCode: this.state.code,
+      reconnectToken: this.seatSecrets.get(playerId) ?? "",
+    });
   }
 
   override onDispose(): void {
@@ -237,6 +298,7 @@ export class LiteratureRoom extends Room<GameState> {
   }
 
   private removePlayer(playerId: string): void {
+    this.seatSecrets.delete(playerId);
     this.state.players.delete(playerId);
     this.hands.delete(playerId);
     this.sessionIdToPlayerId.forEach((pid, sid) => {
@@ -443,6 +505,9 @@ export class LiteratureRoom extends Room<GameState> {
     if (!this.requireHost(client)) return;
     if (this.botTimer) clearTimeout(this.botTimer);
     resetToLobby(this.state, this.hands, this.transactions);
+    for (const id of this.seatSecrets.keys()) {
+      if (!this.state.players.has(id)) this.seatSecrets.delete(id);
+    }
     this.pushAllHands();
   }
 
@@ -528,6 +593,11 @@ function botsToAdd(playerCount: number): number {
   if (playerCount === 0 || playerCount === 1) return Math.max(MIN_PLAYERS - playerCount, 1);
   if (playerCount % 2 === 1) return 1;
   return 2;
+}
+
+/** Only our palette colors: the value is rendered into a style attribute. */
+function sanitizeAvatar(input: unknown): string {
+  return AVATAR_COLORS.includes(input as (typeof AVATAR_COLORS)[number]) ? (input as string) : "";
 }
 
 function pickFreeAvatar(state: GameState): string {

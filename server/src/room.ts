@@ -5,6 +5,7 @@
  * pushed privately to their owners via the "hand" message.
  */
 
+import { randomUUID } from "node:crypto";
 import { Room, type Client } from "@colyseus/core";
 import {
   AVATAR_CHARACTERS,
@@ -92,8 +93,12 @@ export class LiteratureRoom extends Room<GameState> {
   /** Server-only: full transaction log for richer bot inference. */
   private transactions: TransactionLog = [];
 
-  /** Player ids → reconnection tokens (sessionId from Colyseus). */
+  /** Colyseus sessionId → playerId. */
   private sessionIdToPlayerId = new Map<string, string>();
+
+  /** Server-only secret per human seat, sent once in "welcome". Rejoining a
+   *  seat requires it; it's revoked on a deliberate leave or grace expiry. */
+  private seatSecrets = new Map<string, string>();
 
   private botTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -128,11 +133,18 @@ export class LiteratureRoom extends Room<GameState> {
     if (!name) throw new Error("Name required.");
     if (!this.state.status.match(/^(lobby|playing)$/)) throw new Error("Room is not accepting players.");
 
-    // ── Reconnect: restore a disconnected player ─────────────────
-    if (options.reconnectToken && this.state.status === "playing") {
-      const existingPlayer = this.state.players.get(options.reconnectToken);
-      if (existingPlayer && !existingPlayer.connected && existingPlayer.name === name) {
-        this.restoreSeat(options.reconnectToken, client);
+    // ── Reconnect: reclaim a seat with its secret ────────────────
+    // Also covers a client that noticed the drop before the server did
+    // (seat still "connected"): the new socket takes over from the old one.
+    if (options.playerId && options.reconnectToken && this.state.status === "playing") {
+      const secret = this.seatSecrets.get(options.playerId);
+      if (secret && secret === options.reconnectToken && this.state.players.has(options.playerId)) {
+        for (const [sid, pid] of this.sessionIdToPlayerId) {
+          if (pid !== options.playerId) continue;
+          this.sessionIdToPlayerId.delete(sid); // old socket's onLeave becomes a no-op
+          this.clients.find((c) => c.sessionId === sid)?.leave();
+        }
+        this.restoreSeat(options.playerId, client);
         return;
       }
     }
@@ -169,8 +181,9 @@ export class LiteratureRoom extends Room<GameState> {
       this.state.turnId = playerId;
     }
 
+    this.seatSecrets.set(playerId, randomUUID());
     pushAction(this.state, `${name} joined.`);
-    client.send("welcome", { playerId, roomCode: this.state.code });
+    this.sendWelcome(client, playerId);
     this.sendHand(client);
   }
 
@@ -181,7 +194,7 @@ export class LiteratureRoom extends Room<GameState> {
     if (!player) return;
 
     // In lobby, leaving is permanent and team is reshuffled.
-    if (this.state.status === "lobby") {
+    if (this.state.status !== "playing") {
       this.removePlayer(playerId);
       pushAction(this.state, `${player.name} left.`);
       this.maybePromoteHost();
@@ -197,9 +210,12 @@ export class LiteratureRoom extends Room<GameState> {
       if (pid === playerId) this.sessionIdToPlayerId.delete(sid);
     }
     this.maybePromoteHost();
-    this.scheduleBot();
+    // Only kick the scheduler if it's this seat's turn; otherwise leave any
+    // pending (animation-paced) bot timer alone.
+    if (this.state.turnId === playerId) this.scheduleBot();
 
     if (consented) {
+      this.seatSecrets.delete(playerId); // left on purpose: seat is the bot's now
       pushAction(this.state, `${player.name} left. A bot is playing their hand.`);
       return;
     }
@@ -213,7 +229,9 @@ export class LiteratureRoom extends Room<GameState> {
       const p = this.state.players.get(playerId);
       if (p && !p.connected) this.restoreSeat(playerId, back);
     } catch {
-      /* grace period expired — autopilot continues */
+      // Grace expired: autopilot keeps the seat for good, unless they already
+      // came back by token in the meantime.
+      if (this.state.players.get(playerId)?.connected === false) this.seatSecrets.delete(playerId);
     }
   }
 
@@ -227,9 +245,18 @@ export class LiteratureRoom extends Room<GameState> {
       clearTimeout(this.botTimer); // the human takes their own turn
       this.botTimer = null;
     }
+    this.maybePromoteHost();
     pushAction(this.state, `${p.name} reconnected.`);
-    client.send("welcome", { playerId, roomCode: this.state.code });
+    this.sendWelcome(client, playerId);
     this.sendHand(client);
+  }
+
+  private sendWelcome(client: Client, playerId: string): void {
+    client.send("welcome", {
+      playerId,
+      roomCode: this.state.code,
+      reconnectToken: this.seatSecrets.get(playerId) ?? "",
+    });
   }
 
   override onDispose(): void {
@@ -237,6 +264,7 @@ export class LiteratureRoom extends Room<GameState> {
   }
 
   private removePlayer(playerId: string): void {
+    this.seatSecrets.delete(playerId);
     this.state.players.delete(playerId);
     this.hands.delete(playerId);
     this.sessionIdToPlayerId.forEach((pid, sid) => {

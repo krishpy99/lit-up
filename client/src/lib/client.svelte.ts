@@ -15,6 +15,7 @@ import {
   type DeclareCommand,
   type GameStatus,
   type JoinOptions,
+  type WelcomeMessage,
   type MovePlayerCommand,
   type SetKey,
   type SetRoomConfigCommand,
@@ -161,6 +162,8 @@ const SESSION_KEY = "lit-up-session";
 interface StoredSession {
   roomCode: string;
   playerId: string;
+  /** Seat secret from "welcome"; required to rejoin mid-game. */
+  reconnectToken?: string;
   name: string;
   avatar: string;
   character: string;
@@ -174,6 +177,9 @@ class GameClient {
 
   // Pending session data captured at join time, saved once welcome arrives.
   private _pendingName = "";
+  private reconnectToken = "";
+  /** Bumped by create/join/leave so an in-flight auto-rejoin knows to stop. */
+  private rejoinGen = 0;
   private _pendingAvatar = "";
   private _pendingCharacter = "";
 
@@ -294,6 +300,7 @@ class GameClient {
       const s: StoredSession = {
         roomCode: this.roomCode,
         playerId: this.playerId,
+        reconnectToken: this.reconnectToken,
         name: this._pendingName,
         avatar: this._pendingAvatar,
         character: this._pendingCharacter,
@@ -307,8 +314,9 @@ class GameClient {
   }
 
   /** Called on app mount — silently reconnects if a saved session exists.
-   *  `attempts` > 1 retries transient failures (e.g. a network blip). */
-  async tryAutoReconnect(attempts = 1): Promise<void> {
+   *  `retryForMs` > 0 keeps retrying network failures (with backoff) for that
+   *  long, e.g. the server's seat-hold window after a connection drop. */
+  async tryAutoReconnect(retryForMs = 0): Promise<void> {
     let s: StoredSession | null = null;
     try {
       const raw = localStorage.getItem(SESSION_KEY);
@@ -316,26 +324,38 @@ class GameClient {
     } catch { /* corrupt data */ }
     if (!s?.roomCode || !s?.playerId || !s?.name) return;
 
+    const gen = ++this.rejoinGen;
+    const deadline = Date.now() + retryForMs;
     this._pendingName = s.name;
     this._pendingAvatar = s.avatar;
     this._pendingCharacter = s.character;
     this.status = "connecting";
-    for (let i = 0; i < attempts; i++) {
+    let serverSaidNo = false;
+    for (let delay = 1000; ; delay = Math.min(delay * 2, 15000)) {
       try {
         const room = await this.client.joinById<unknown>(s.roomCode, {
           name: s.name,
           avatar: s.avatar,
           character: s.character,
-          reconnectToken: s.playerId,
+          playerId: s.playerId,
+          reconnectToken: s.reconnectToken,
         } satisfies JoinOptions);
+        if (gen !== this.rejoinGen) { room.leave(true); return; } // user moved on
         this.bindRoom(room);
         return;
-      } catch {
-        if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2000));
+      } catch (err) {
+        if (gen !== this.rejoinGen) return;
+        // A numeric code means the server answered (room gone, seat refused):
+        // give up for good. Anything else is the network — keep trying.
+        serverSaidNo = typeof (err as { code?: unknown })?.code === "number";
+        if (serverSaidNo || Date.now() + delay > deadline) break;
+        await new Promise((r) => setTimeout(r, delay));
+        if (gen !== this.rejoinGen) return;
       }
     }
-    // Room gone or session expired — wipe and stay on landing.
-    this.clearSession();
+    // Only forget the seat if the server refused it; on a plain network
+    // failure keep it so a later refresh can still get back in.
+    if (serverSaidNo) this.clearSession();
     this.status = "idle";
   }
 
@@ -346,6 +366,7 @@ class GameClient {
       this.errorBanner = "Enter a name to host.";
       return;
     }
+    this.rejoinGen++;
     this._pendingName = name.trim();
     this._pendingAvatar = avatar;
     this._pendingCharacter = character;
@@ -375,6 +396,7 @@ class GameClient {
       this.errorBanner = "Enter a room code.";
       return;
     }
+    this.rejoinGen++;
     this._pendingName = trimmedName;
     this._pendingAvatar = avatar;
     this._pendingCharacter = character;
@@ -394,6 +416,7 @@ class GameClient {
   }
 
   leave(): void {
+    this.rejoinGen++;
     this.clearSession();
     this.room?.leave(true);
     this.room = null;
@@ -517,9 +540,10 @@ class GameClient {
       }
     });
 
-    room.onMessage("welcome", (msg: { playerId: string; roomCode: string }) => {
+    room.onMessage("welcome", (msg: WelcomeMessage) => {
       this.playerId = msg.playerId;
       this.roomCode = msg.roomCode;
+      this.reconnectToken = msg.reconnectToken;
       this.status = "connected";
       this.saveSession();
     });
@@ -555,7 +579,7 @@ class GameClient {
       this.headHandApplied = false;
       this.status = "idle";
       this.view = "landing";
-      if (rejoin) void this.tryAutoReconnect(5);
+      if (rejoin) void this.tryAutoReconnect(5 * 60_000); // server holds the seat 5 min
     });
 
     room.onError((_code, message) => {

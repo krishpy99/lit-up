@@ -68,6 +68,8 @@ export interface HandMessage {
 export interface WelcomeMessage {
   playerId: string;
   roomCode: string;
+  /** Secret for reclaiming this seat after a disconnect. Keep it private. */
+  reconnectToken: string;
 }
 
 /** Recoverable error — surfaces as a toast. */
@@ -82,7 +84,8 @@ export interface JoinOptions {
   avatar: string;
   /** Emoji or single-character glyph to render inside the avatar. */
   character?: string;
-  /** When set, attempts to reconnect to an existing player slot. */
+  /** Seat to reclaim mid-game, together with its secret `reconnectToken`. */
+  playerId?: string;
   reconnectToken?: string;
 }
 

@@ -121,7 +121,15 @@
  *   (coldness = max(0, 4 − teamKnown))
  *
  * ─── DIFFICULTY LEVELS ───────────────────────────────────────────────────────
- *   easy   — noisy probability model (22% forget rate, 12% random asks, no
+ * ─── MEMORY & HUMAN-LIKE PLAY ───────────────────────────────────────────────
+ * Bots never share a global knowledge table. Each bot replays only the asks it
+ * *remembers*: everything it was part of, the last N asks, and a stable random
+ * fraction of older ones (see MEMORY). Forgotten asks stay forgotten, so a bot
+ * can misremember who took a card and declare wrongly — just like a person.
+ * Declares are built from the bot's beliefs, never from peeking at hands.
+ * Final choice is a softmax over candidate scores, so bots aren't predictable.
+ *
+ *   easy   — noisy probability model (short memory, 12% random asks, no
  *            fresh-set penalty). Information leaks freely. No opponent modelling,
  *            no teammate coordination, no tactics.
  *
@@ -151,13 +159,67 @@ import {
  *  of which version of the shared package is installed in node_modules. */
 type BotDifficulty = "easy" | "medium" | "hard" | "expert";
 import type { GameState, Player } from "./schema.js";
-import type { CardKnowledge, HandStore, Transaction, TransactionLog } from "./rules.js";
+import {
+  applyAsk,
+  applyDeclare,
+  applyPass,
+  findNextPlayerWithCards,
+  newKnowledge,
+  pushAction,
+  recordFailure,
+  recordSuccess,
+  type CardKnowledge,
+  type HandStore,
+  type Transaction,
+  type TransactionLog,
+} from "./rules.js";
 import { appendFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { resolve, dirname } from "path";
 
 const _botLogPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../bot-thinking.log");
-const BOT_LOG = process.env.NODE_ENV !== "production";
+const BOT_LOG = process.env.LIT_BOT_LOG === "1";
+
+/**
+ * How well each tier remembers the public ask history.
+ * recent — the last N asks are always remembered.
+ * keep   — chance an older ask is still remembered (stable per bot+ask).
+ * temp   — softmax temperature for the final pick (higher = looser play).
+ */
+const MEMORY: Record<BotDifficulty, { recent: number; keep: number; temp: number }> = {
+  easy: { recent: 8, keep: 0.45, temp: 5 },
+  medium: { recent: 10, keep: 0.55, temp: 3 },
+  hard: { recent: 30, keep: 0.9, temp: 1.5 },
+  expert: { recent: Infinity, keep: 1, temp: 0.6 },
+};
+
+/** Deterministic [0,1) hash so a forgotten ask stays forgotten across turns. */
+function stableRandom(key: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 16777619);
+  return (h >>> 0) / 4294967296;
+}
+
+/** The slice of the public log this bot actually remembers. */
+export function rememberedLog(txLog: TransactionLog, botId: string, diff: BotDifficulty): TransactionLog {
+  const m = MEMORY[diff];
+  return txLog.filter((tx, i) => {
+    if (tx.askerId === botId || tx.targetId === botId) return true;
+    if (txLog.length - 1 - i < m.recent) return true;
+    return stableRandom(`${botId}:${tx.seq}`) < m.keep;
+  });
+}
+
+/** Rebuild card knowledge from (remembered) asks. */
+function replayKnowledge(log: TransactionLog): CardKnowledge {
+  const ck = newKnowledge();
+  for (const tx of log) {
+    recordFailure(ck, tx.card, tx.askerId); // the asker didn't hold it
+    recordFailure(ck, tx.card, tx.targetId);
+    if (tx.success) recordSuccess(ck, tx.card, tx.askerId);
+  }
+  return ck;
+}
 
 function botLog(entry: object): void {
   if (!BOT_LOG) return;
@@ -166,7 +228,7 @@ function botLog(entry: object): void {
 
 export type BotAction =
   | { type: "ask"; targetId: string; card: Card }
-  | { type: "declare"; setKey: SetKey }
+  | { type: "declare"; setKey: SetKey; assignments: Record<Card, string> }
   | { type: "pass"; toPlayerId?: string };
 
 // ── Knowledge model types ──────────────────────────────────────────────────
@@ -232,8 +294,8 @@ function buildContext(
   ck: CardKnowledge,
   txLog: TransactionLog,
   bot: Player,
+  diff: BotDifficulty,
 ): BotCtx {
-  const diff = state.botDifficulty as BotDifficulty; // schema type is a superset
   const myHand = hands.get(bot.id) ?? [];
   const allPlayers = [...state.players.values()];
   const teammates = allPlayers.filter(p => p.team === bot.team && p.id !== bot.id);
@@ -354,63 +416,40 @@ function buildContext(
 export function decideBotAction(
   state: GameState,
   hands: HandStore,
-  ck: CardKnowledge,
-  txLog: TransactionLog,
+  fullLog: TransactionLog,
   bot: Player,
+  diff: BotDifficulty = state.botDifficulty as BotDifficulty,
 ): BotAction {
   if ((hands.get(bot.id) ?? []).length === 0) return { type: "pass" };
 
-  const ctx = buildContext(state, hands, ck, txLog, bot);
+  const txLog = rememberedLog(fullLog, bot.id, diff);
+  const ctx = buildContext(state, hands, replayKnowledge(txLog), txLog, bot, diff);
 
-  // 1a. Declare when teamCards (derived from successful asks) confirms all 6.
-  //     Guard: the bot must personally hold at least one card from the set
-  //     (game rule: the declarer must hold a base card to be eligible).
+  // 1. Declare from belief. Declare once every card is placed, or the whole
+  //    set is provably on our team; easy gets rash and guesses the last card.
+  // Easy is occasionally rash: 15% of the time it'll gamble on 5 known cards.
+  const rash = ctx.diff === "easy" && Math.random() < 0.15 ? 5 : 6;
   for (const s of SET_DEFS) {
     if (ctx.claimed.has(s.key)) continue;
     if (!ctx.myHand.some(c => s.cards.includes(c))) continue; // must hold a base
-    if (s.cards.every(c => ctx.teamCards.has(c))) {
-      botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", path: "1a-direct", setKey: s.key });
-      return { type: "declare", setKey: s.key };
+    // onTeam: the set is provably ours but some holders are a best guess —
+    // a person would declare here too rather than ask forever.
+    const { assignments, certain, onTeam } = locateSet(s.key, ctx);
+    if (assignments && (certain >= rash || onTeam)) {
+      botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", certain, setKey: s.key });
+      return { type: "declare", setKey: s.key, assignments };
     }
   }
 
-  // 1b. Certainty-only inferred declare: every card is either in teamCards/myHand
-  //     OR all opponents have been concretely eliminated from holding it (via
-  //     ck.absent — failed asks or witnessed transfers). This covers cards that
-  //     were never transferred but that opponents have been fully eliminated from.
-  //     INVARIANT: only fires from concrete evidence in ck; inference never gates a
-  //     declare. The bot must personally hold a card (same rule as path 1a).
-  for (const s of SET_DEFS) {
-    if (ctx.claimed.has(s.key)) continue;
-    if (!ctx.myHand.some(c => s.cards.includes(c))) continue; // must hold a base
-    const allCertain = s.cards.every(c => {
-      // Confirmed on team via transaction log.
-      if (ctx.myHand.includes(c) || ctx.teamCards.has(c)) return true;
-      // All opponents are concretely eliminated via ck.absent.
-      const absent = ctx.ck.get(c)?.absent ?? new Set<string>();
-      return ctx.opponents.every(o => absent.has(o.id));
-    });
-    if (allCertain) {
-      botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", path: "1b-certain", setKey: s.key });
-      return { type: "declare", setKey: s.key };
-    }
-  }
-
-  // 1c. No-opponents declare: when all opponents are empty (no cards), any unclaimed
-  //     set where the bot holds a card must have all its remaining cards on the bot's
-  //     team (there's nobody else to hold them). Declare immediately.
-  //     This covers the end-game case where cards were dealt to teammates and never
-  //     transferred (so teamCards and ck.absent are incomplete), but the team
-  //     trivially holds everything because the other team is exhausted.
+  // No opponent has cards: every remaining card is on our team, so we must
+  // declare — guessing who holds what where memory doesn't say.
   if (ctx.opponents.length === 0) {
     for (const s of SET_DEFS) {
       if (ctx.claimed.has(s.key)) continue;
-      if (ctx.myHand.some(c => s.cards.includes(c))) {
-        botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "declare", path: "1c-no-opponents", setKey: s.key });
-        return { type: "declare", setKey: s.key };
-      }
+      if (!ctx.myHand.some(c => s.cards.includes(c))) continue;
+      const { assignments } = locateSet(s.key, ctx);
+      if (assignments) return { type: "declare", setKey: s.key, assignments };
     }
-    botLog({ ts: new Date().toISOString(), bot: bot.id, name: bot.name, action: "pass", reason: "no-opponents-no-declarable" });
     return { type: "pass" };
   }
 
@@ -452,9 +491,7 @@ export function decideBotAction(
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  const topScore = candidates[0].score;
-  const top = candidates.filter(c => c.score >= topScore - 0.001);
-  const pick = top[Math.floor(Math.random() * top.length)];
+  const pick = softmaxPick(candidates, MEMORY[ctx.diff].temp);
 
   if (BOT_LOG) {
     const setAnalyses = SET_DEFS
@@ -498,23 +535,19 @@ function computeCardOdds(card: Card, ctx: BotCtx): Map<string, number> {
   if (myHand.includes(card)) return odds;
   if (teamCards.has(card)) return odds;
 
-  // forget rate: easy = 22% (noisy), medium = 15%, hard = 3%, expert = 0%
-  const forgetRate = ctx.diff === "easy" ? 0.22 : ctx.diff === "medium" ? 0.15 : ctx.diff === "hard" ? 0.03 : 0;
-  const forget = forgetRate > 0 && Math.random() < forgetRate;
-
-  const info = forget ? undefined : ck.get(card);
+  const info = ck.get(card);
 
   if (info?.holder) {
     odds.set(info.holder, 1.0);
     return odds;
   }
 
-  const absent = forget ? new Set<string>() : (info?.absent ?? new Set<string>());
+  const absent = info?.absent ?? new Set<string>();
 
   const knownInSet = new Map<string, number>();
   for (const c of SET_LOOKUP[setKey].cards) {
     if (c === card) continue;
-    const h = forget ? undefined : ck.get(c)?.holder;
+    const h = ck.get(c)?.holder;
     if (h) knownInSet.set(h, (knownInSet.get(h) ?? 0) + 1);
   }
 
@@ -1286,30 +1319,95 @@ function deriveTeamCardsFromKnowledge(
   return cards;
 }
 
+/** Weighted-random pick: near-best asks get chosen sometimes, never junk. */
+function softmaxPick(sorted: Candidate[], temp: number): Candidate {
+  const top = sorted[0].score;
+  const weights = sorted.map(c => Math.exp((c.score - top) / temp));
+  let r = Math.random() * weights.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < sorted.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return sorted[i];
+  }
+  return sorted[0];
+}
+
 /**
- * For a confirmed-correct declare, build the card → playerId assignment map
- * by inspecting the actual hands. Returns null if the team doesn't hold all
- * six cards (should not happen in normal play).
+ * Where the bot *believes* each card of a set is, using only its own hand and
+ * remembered asks. `certain` counts cards it can place for sure; the rest are
+ * guessed among teammates. `assignments` is null if a card is believed to be
+ * with an opponent.
  */
-export function buildBotDeclareAssignments(
+function locateSet(
+  setKey: SetKey,
+  ctx: BotCtx,
+): { assignments: Record<Card, string> | null; certain: number; onTeam: boolean } {
+  const team = [ctx.bot, ...ctx.teammates].filter(p => (ctx.hands.get(p.id) ?? []).length > 0);
+  const assignments: Record<Card, string> = {};
+  let certain = 0;
+  let onTeam = true; // every unplaced card has been ruled out for all opponents
+  for (const card of SET_LOOKUP[setKey].cards) {
+    if (ctx.myHand.includes(card)) { assignments[card] = ctx.bot.id; certain++; continue; }
+    const info = ctx.ck.get(card);
+    // A remembered holder with an empty hand is stale memory — ignore it.
+    const holder = info?.holder && (ctx.hands.get(info.holder) ?? []).length > 0
+      ? ctx.state.players.get(info.holder) : undefined;
+    if (holder) {
+      if (holder.team !== ctx.bot.team) return { assignments: null, certain, onTeam: false };
+      assignments[card] = holder.id; certain++; continue;
+    }
+    const absent = info?.absent ?? new Set<string>();
+    const oppsLeft = ctx.opponents.filter(o => !absent.has(o.id));
+    const mates = team.filter(p => p.id !== ctx.bot.id && !absent.has(p.id));
+    if (oppsLeft.length === 0 && mates.length === 1) { assignments[card] = mates[0].id; certain++; continue; }
+    if (oppsLeft.length > 0) onTeam = false;
+    // Guess: the teammate who seems most engaged in this set, then biggest hand.
+    const pool = mates.length ? mates : team.filter(p => p.id !== ctx.bot.id);
+    if (pool.length === 0) return { assignments: null, certain, onTeam: false };
+    const weight = (id: string) =>
+      (ctx.playerSetKnowledge.get(id)?.get(setKey)?.minCount ?? 0) * 10 + (ctx.hands.get(id)?.length ?? 0);
+    assignments[card] = pool.reduce((a, b) => (weight(b.id) > weight(a.id) ? b : a)).id;
+  }
+  return { assignments, certain, onTeam };
+}
+
+/**
+ * Play one full bot turn against the real rules: decide, apply, and guarantee
+ * the turn moves on (a bot can never wedge the game). Used by the room and
+ * by the headless sim, so the sim exercises exactly what players face.
+ */
+export function playBotTurn(
   state: GameState,
   hands: HandStore,
-  bot: Player,
-  setKey: SetKey,
-): Record<Card, string> | null {
-  const set = SET_LOOKUP[setKey];
-  if (!set) return null;
-  const assignments: Record<Card, string> = {};
-  for (const card of set.cards) {
-    let found: string | null = null;
-    state.players.forEach((p: Player, id: string) => {
-      if (p.team !== bot.team) return;
-      if ((hands.get(id) ?? []).includes(card)) found = id;
-    });
-    if (!found) return null;
-    assignments[card] = found;
+  txLog: TransactionLog,
+  botId: string,
+  diff: BotDifficulty = state.botDifficulty as BotDifficulty,
+): void {
+  const bot = state.players.get(botId);
+  if (!bot || state.status !== "playing" || state.turnId !== botId) return;
+  const action = decideBotAction(state, hands, txLog, bot, diff);
+
+  let err: string | null = "no-op";
+  if (action.type === "ask") {
+    err = applyAsk(state, hands, txLog, botId, action.targetId, action.card);
+  } else if (action.type === "declare") {
+    err = applyDeclare(state, hands, botId, action.setKey, action.assignments);
+    // Still holding the post-declare turn with an empty hand → hand it on.
+    if (!err && state.postDeclareId === botId && (hands.get(botId) ?? []).length === 0) {
+      applyPass(state, hands, botId);
+    }
+  } else if (state.postDeclareId === botId) {
+    err = applyPass(state, hands, botId, action.toPlayerId);
+    if (err) err = applyPass(state, hands, botId);
   }
-  return assignments;
+
+  if (err && state.status === "playing" && state.turnId === botId) {
+    const next = findNextPlayerWithCards(state, hands, botId);
+    if (next && next !== botId) {
+      state.postDeclareId = "";
+      state.turnId = next;
+      pushAction(state, `${bot.name} passed.`);
+    }
+  }
 }
 
 // Re-export for the room module's convenience.

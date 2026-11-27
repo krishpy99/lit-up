@@ -5,7 +5,7 @@ A real-time multiplayer Literature card game.
 * **Authoritative server** (Colyseus on Node) holds the truth and validates every move.
 * **Per-client filtered state** — your hand is sent privately; only public state syncs to all.
 * **Reactive UI** in Svelte 5 with smooth card animations via [Motion](https://motion.dev).
-* **Reconnect-safe** — drop your phone, walk into a tunnel, come back; your seat is held for 60s.
+* **Reconnect-safe** — drop your phone, walk into a tunnel, come back; a bot plays your seat until you rejoin (auto-rejoin, 5 min grace).
 
 ## Quick start
 
@@ -51,8 +51,9 @@ lit-up/
 * **Single room class** (`server/src/room.ts`) handles join, leave, and command messages.
 * **Pure rule functions** (`server/src/rules.ts`) — `applyAsk`, `applyDeclare`, `applyPass`. They mutate the synced state and a server-only `HandStore` map.
 * **Schema** (`server/src/schema.ts`) — only public fields (no hands).
-* **Bot AI** (`server/src/bot.ts`) — same three difficulties as the original, with shared card-knowledge tracking that runs on the server, not the host.
-* **Reconnect grace** — 60s window, configured in `room.ts`.
+* **Bot AI** (`server/src/bot.ts`) — four tiers (easy → expert). Each bot only knows what it *remembers* of the public asks (memory fades by tier), declares from its beliefs (so it can get them wrong), and picks among good moves with weighted randomness. `playBotTurn` is the single entry point used by the room and the sim.
+* **Disconnects** — the seat flips to autopilot in place (same hand, same turn order) and flips back on reconnect. Grace window: `LIT_RECONNECT_GRACE_S` (default 300).
+* **Checks** — `npm run test:integration -w server`, `npm run sim -w server` (bot-only games: hang detection + win-rate matrix), `npm run smoke -w server` (against a running server).
 
 ### Client
 

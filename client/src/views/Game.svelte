@@ -370,7 +370,7 @@
     border-radius: 50%;
     /* Spread particles across the viewport using --i to vary position + color */
     left: calc(10% + (var(--i) * 4.5%) );
-    top: calc(20% + ((var(--i) * 7) % 40) * 1%);
+    top: calc(20% + mod(var(--i) * 7, 40) * 1%);
     animation: firework-burst 2.4s ease-out calc(var(--i) * 0.14s) 3 both;
     background: hsl(calc(var(--i) * 20deg), 90%, 65%);
     box-shadow:

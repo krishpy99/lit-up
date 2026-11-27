@@ -48,9 +48,7 @@ function forceClose(room: ClientRoom<GameState>): void {
   throw new Error("Could not locate WebSocket to force-close");
 }
 
-/**
- * Join a room by id and wait for the "welcome" message.
- */
+/** Join a room by id. Fresh joins use the sessionId as the player id. */
 async function joinAndWelcome(
   colyseus: ColyseusTestServer,
   roomId: string,
@@ -58,14 +56,8 @@ async function joinAndWelcome(
   extra?: Record<string, unknown>,
 ): Promise<{ room: ClientRoom<GameState>; playerId: string }> {
   const room = await colyseus.sdk.joinById<GameState>(roomId, { name, ...extra });
-  const playerId = await new Promise<string>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("No welcome within 5s")), 5000);
-    room.onMessage("welcome", (msg: { playerId: string }) => {
-      clearTimeout(t);
-      resolve(msg.playerId);
-    });
-  });
-  return { room, playerId };
+  room.onMessage("*", () => {}); // silence unhandled-message warnings
+  return { room, playerId: room.sessionId };
 }
 
 /**
@@ -76,13 +68,8 @@ async function buildGame(colyseus: ColyseusTestServer): Promise<
   Array<{ room: ClientRoom<GameState>; playerId: string }>
 > {
   const host = await colyseus.sdk.create<GameState>("literature", { name: "Alice" });
-  const hostPlayerId = await new Promise<string>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("No host welcome within 5s")), 5000);
-    host.onMessage("welcome", (msg: { playerId: string }) => {
-      clearTimeout(t);
-      resolve(msg.playerId);
-    });
-  });
+  host.onMessage("*", () => {});
+  const hostPlayerId = host.sessionId;
 
   const players: Array<{ room: ClientRoom<GameState>; playerId: string }> = [
     { room: host, playerId: hostPlayerId },
@@ -120,144 +107,65 @@ describe("disconnect integration", () => {
     await colyseus.shutdown();
   });
 
-  // ── Test 1: bot takeover on disconnect ──────────────────────────────────────
+  // ── Test 1: autopilot takes over the same seat on disconnect ───────────────
 
-  it("replaces disconnected player with a bot within 2 s", async () => {
-    const players = await buildGame(colyseus);
-    const [host, victim, c, d] = players;
+  it("puts a disconnected player's seat on autopilot without duplicating it", async () => {
+    const [host, victim, c, d] = await buildGame(colyseus);
+    const serverRoom = colyseus.getRoomById<GameState>(host.room.roomId) as LiteratureRoom;
+    const hands: Map<string, string[]> = (serverRoom as any).hands;
+    const handBefore = [...(hands.get(victim.playerId) ?? [])];
 
-    assert.equal(
-      (host.room.state as GameState).players.size,
-      4,
-      "expected 4 players before disconnect",
-    );
-
-    const victimPlayerId = victim.playerId;
-
-    // Abrupt disconnect — triggers consented=false on the server
+    // Make it the victim's turn so we also prove the game can't wedge on them.
+    serverRoom.state.turnId = victim.playerId;
     forceClose(victim.room);
 
-    // Within 2 s: victim.connected=false AND a bot named "Bob (Bot)" appears.
-    // room.ts line ~255: bot.name = `${player.name} (Bot)` for mid-game disconnects.
     await waitFor(() => {
-      const state = host.room.state as GameState;
-      const victimPlayer = state.players.get(victimPlayerId);
-      if (!victimPlayer || victimPlayer.connected) return false;
-      let hasBotReplacement = false;
-      state.players.forEach((p) => {
-        if (p.isBot && p.name === "Bob (Bot)") hasBotReplacement = true;
-      });
-      return hasBotReplacement;
+      const p = serverRoom.state.players.get(victim.playerId);
+      return !!p && !p.connected && p.isBot;
     }, 2000);
 
-    const stateAfter = host.room.state as GameState;
+    assert.equal(serverRoom.state.players.size, 4, "no extra replacement player");
+    const total = [...hands.values()].reduce((n, h) => n + h.length, 0);
+    assert.equal(total, 54 - 6 * (serverRoom.state.claimedA.length + serverRoom.state.claimedB.length), "no cards duplicated or lost");
 
-    // turnId must NOT be the disconnected player
-    assert.notEqual(
-      stateAfter.turnId,
-      victimPlayerId,
-      "turnId must not belong to the disconnected player",
+    // Autopilot plays the turn (bot think is 0 in tests).
+    await waitFor(
+      () => serverRoom.state.turnId !== victim.playerId || (hands.get(victim.playerId) ?? []).join() !== handBefore.join(),
+      3000,
     );
 
-    const turnPlayer = stateAfter.players.get(stateAfter.turnId);
-    assert.ok(turnPlayer, `turnId '${stateAfter.turnId}' must reference a valid player`);
-
-    let botFound = false;
-    stateAfter.players.forEach((p) => {
-      if (p.isBot && p.name === "Bob (Bot)") botFound = true;
-    });
-    assert.ok(botFound, "a bot named 'Bob (Bot)' must exist in player map");
-
-    for (const { room } of [host, c, d]) {
-      room.leave(true);
-    }
+    for (const { room } of [host, c, d]) room.leave(true);
   });
 
-  // ── Test 2: reconnect card visibility ────────────────────────────────────────
+  // ── Test 2: reconnect by token hands the seat back ─────────────────────────
 
-  it("sends the hand immediately on reconnect without waiting for another event", async () => {
-    const players = await buildGame(colyseus);
-    const [host, victim, c, d] = players;
-
-    const victimPlayerId = victim.playerId;
+  it("hands the seat (and hand) back on reconnect", async () => {
+    const [host, victim, c, d] = await buildGame(colyseus);
     const roomId = victim.room.roomId;
-
-    // Get the server-side room so we can inspect the hand store directly.
-    // This avoids the race between joinById resolving and the "hand" message
-    // arriving — the server-side hands map is authoritative.
     const serverRoom = colyseus.getRoomById<GameState>(roomId) as LiteratureRoom;
-    const serverHands: Map<string, string[]> = (serverRoom as any).hands;
+    const hands: Map<string, string[]> = (serverRoom as any).hands;
 
-    // Verify victim has cards before disconnect
-    const handBefore = serverHands.get(victimPlayerId) ?? [];
-    assert.ok(handBefore.length > 0, "victim should have cards before disconnect");
-
-    // Abrupt disconnect
     forceClose(victim.room);
+    await waitFor(() => serverRoom.state.players.get(victim.playerId)?.connected === false, 2000);
 
-    // Wait for server to mark victim disconnected and spawn a bot
-    await waitFor(() => {
-      const p = (serverRoom.state as GameState).players.get(victimPlayerId);
-      return p !== undefined && !p.connected;
-    }, 2000);
-
-    // The bot now holds a copy of the victim's hand (room.ts line ~237)
-    // Find the bot that replaced the victim
-    let botId: string | null = null;
-    (serverRoom.state as GameState).players.forEach((p, id) => {
-      if (p.isBot && p.name === "Bob (Bot)") botId = id;
-    });
-    assert.ok(botId !== null, "bot replacement should exist after disconnect");
-
-    // On reconnect, the server restores `existingPlayer.connected = true`,
-    // removes the bot, and calls sendHand(client) — so the victim's server-side
-    // hand must still be intact.
-    const handStillExists = serverHands.has(victimPlayerId);
-    assert.ok(
-      handStillExists,
-      "victim's hand must still exist in server hand store during reconnect window",
-    );
-
-    // Reconnect — use original playerId as reconnectToken
     const reconnected = await colyseus.sdk.joinById<GameState>(roomId, {
       name: "Bob",
-      reconnectToken: victimPlayerId,
+      reconnectToken: victim.playerId,
     });
-
-    // Verify the reconnect went through: the victim player is connected again
-    // and the bot replacement has been removed.
-    await waitFor(() => {
-      const state = serverRoom.state as GameState;
-      const p = state.players.get(victimPlayerId);
-      return p !== undefined && p.connected;
-    }, 3000);
-
-    const stateAfterReconnect = serverRoom.state as GameState;
-
-    // Victim must be reconnected
-    const reconnectedPlayer = stateAfterReconnect.players.get(victimPlayerId);
-    assert.ok(reconnectedPlayer, "victim player must still be in player map");
-    assert.equal(reconnectedPlayer.connected, true, "victim.connected must be true after reconnect");
-
-    // Bot replacement must have been removed
-    let botStillExists = false;
-    stateAfterReconnect.players.forEach((p, id) => {
-      if (p.isBot && p.name === "Bob (Bot)") botStillExists = true;
-    });
-    assert.equal(botStillExists, false, "bot replacement must be removed after reconnect");
-
-    // Hand must still be in the server's hand store (the "hand" message
-    // delivers these cards to the client immediately after reconnect)
-    const handAfterReconnect = serverHands.get(victimPlayerId) ?? [];
-    assert.ok(
-      handAfterReconnect.length > 0,
-      "victim's server-side hand must be non-empty immediately after reconnect",
+    const handMsg = new Promise<string[]>((resolve) =>
+      reconnected.onMessage("hand", (m: { hand: string[] }) => resolve(m.hand)),
     );
+    reconnected.onMessage("*", () => {});
+
+    await waitFor(() => serverRoom.state.players.get(victim.playerId)?.connected === true, 3000);
+    const p = serverRoom.state.players.get(victim.playerId)!;
+    assert.equal(p.isBot, false, "seat is human again");
+    assert.equal(serverRoom.state.players.size, 4);
+    const got = await handMsg;
+    assert.deepEqual(got, hands.get(victim.playerId), "client receives its current hand");
 
     reconnected.leave(true);
-    for (const { room } of [host, c, d]) {
-      room.leave(true);
-    }
+    for (const { room } of [host, c, d]) room.leave(true);
   });
 
   // ── Test 3: stale declare guard ────────────────────────────────────────────

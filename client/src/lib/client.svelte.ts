@@ -306,8 +306,9 @@ class GameClient {
     try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
   }
 
-  /** Called on app mount — silently reconnects if a saved session exists. */
-  async tryAutoReconnect(): Promise<void> {
+  /** Called on app mount — silently reconnects if a saved session exists.
+   *  `attempts` > 1 retries transient failures (e.g. a network blip). */
+  async tryAutoReconnect(attempts = 1): Promise<void> {
     let s: StoredSession | null = null;
     try {
       const raw = localStorage.getItem(SESSION_KEY);
@@ -319,19 +320,23 @@ class GameClient {
     this._pendingAvatar = s.avatar;
     this._pendingCharacter = s.character;
     this.status = "connecting";
-    try {
-      const room = await this.client.joinById<unknown>(s.roomCode, {
-        name: s.name,
-        avatar: s.avatar,
-        character: s.character,
-        reconnectToken: s.playerId,
-      } satisfies JoinOptions);
-      this.bindRoom(room);
-    } catch {
-      // Room gone or session expired — wipe and stay on landing.
-      this.clearSession();
-      this.status = "idle";
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const room = await this.client.joinById<unknown>(s.roomCode, {
+          name: s.name,
+          avatar: s.avatar,
+          character: s.character,
+          reconnectToken: s.playerId,
+        } satisfies JoinOptions);
+        this.bindRoom(room);
+        return;
+      } catch {
+        if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2000));
+      }
     }
+    // Room gone or session expired — wipe and stay on landing.
+    this.clearSession();
+    this.status = "idle";
   }
 
   // ── Lifecycle ────────────────────────────────────────────
@@ -532,11 +537,14 @@ class GameClient {
       this.toast(msg.message, "error");
     });
 
-    room.onLeave(() => {
-      // Only wipe session if the game has ended — a mid-game disconnect
-      // should let the user refresh to reconnect.
+    room.onLeave((code) => {
+      if (this.room !== room) return; // stale room (we already left/rebound)
+      const wasPlaying = this.room$?.status === "playing";
       if (this.room$?.status === "ended") this.clearSession();
-      this.toast("Disconnected from room.", "warn");
+      // 4000 = we left on purpose. Anything else mid-game is a network drop:
+      // a bot holds the seat, so quietly rejoin it.
+      const rejoin = code !== 4000 && wasPlaying;
+      this.toast(rejoin ? "Connection lost — rejoining…" : "Disconnected from room.", "warn");
       this.room = null;
       this.room$ = null;
       this.visibleRoom$ = null;
@@ -547,6 +555,7 @@ class GameClient {
       this.headHandApplied = false;
       this.status = "idle";
       this.view = "landing";
+      if (rejoin) void this.tryAutoReconnect(5);
     });
 
     room.onError((_code, message) => {

@@ -66,21 +66,23 @@ export type Transaction = {
   success: boolean;
   /** Asker's team at time of ask (used to derive teammate engagement). */
   askerTeam: Team;
+  /** Monotonic id; lets each bot decide (stably) which asks it remembers. */
+  seq: number;
 };
 
 export type TransactionLog = Transaction[];
 
-const TRANSACTIONS_CAP = 200;
+const TRANSACTIONS_CAP = 1000;
 
-export function appendTransaction(log: TransactionLog, tx: Transaction): void {
-  log.push(tx);
+export function appendTransaction(log: TransactionLog, tx: Omit<Transaction, "seq">): void {
+  log.push({ ...tx, seq: (log.at(-1)?.seq ?? 0) + 1 });
   while (log.length > TRANSACTIONS_CAP) log.shift();
 }
 
 /**
  * Card knowledge tracker. Each card has either a known holder (from witnessing
  * a successful ask) or a list of players ruled out (from witnessed failures).
- * Used by bot AI; resets each game.
+ * Each bot builds its own from the asks it remembers (see bot.ts).
  */
 export type CardKnowledge = Map<Card, { holder: string | null; absent: Set<string> }>;
 
@@ -202,20 +204,25 @@ export function resetToLobby(state: GameState, hands: HandStore, txLog: Transact
   state.lastDeclare.assignments.clear();
   state.postDeclareId = "";
 
-  // Drop disconnected non-host players.
+  // Drop disconnected humans (their seat was on autopilot). Real bots are
+  // always `connected`, so they stay.
   const toDrop: string[] = [];
   state.players.forEach((p: Player, id: string) => {
-    if (!p.connected && id !== state.hostId) toDrop.push(id);
+    if (!p.connected) toDrop.push(id);
   });
   toDrop.forEach((id) => {
     state.players.delete(id);
     hands.delete(id);
   });
+  if (!state.players.has(state.hostId)) {
+    const next = [...state.players.values()].find((p) => !p.isBot);
+    state.hostId = next?.id ?? "";
+    if (next) next.isHost = true;
+  }
 
-  state.players.forEach((p: Player, id: string) => {
+  state.players.forEach((_p: Player, id: string) => {
     hands.set(id, []);
-    p.cardCount = 0;
-    p.connected = true;
+    state.players.get(id)!.cardCount = 0;
   });
   assignTeams(state);
   state.turnId = state.hostId;
@@ -227,7 +234,6 @@ export function resetToLobby(state: GameState, hands: HandStore, txLog: Transact
 export function applyAsk(
   state: GameState,
   hands: HandStore,
-  ck: CardKnowledge,
   txLog: TransactionLog,
   askerId: string,
   toPlayerId: string,
@@ -255,21 +261,12 @@ export function applyAsk(
 
   const success = targetHand.includes(card);
 
-  // The asker does NOT hold this card — they asked for it. Recording this
-  // enables elimination-based inference: once every other player is absent,
-  // the remaining one must hold it.
-  recordFailure(ck, card, askerId);
-
   if (success) {
     hands.set(toPlayerId, targetHand.filter((c) => c !== card));
     askerHand.push(card);
-    // Target no longer holds the card; asker now does.
-    recordFailure(ck, card, toPlayerId);
-    recordSuccess(ck, card, askerId); // sets holder = asker, clears asker from absent
     pushAction(state, `${asker.name} → ${target.name} for ${cardLabel(card)} ✓`);
     state.turnId = askerId;
   } else {
-    recordFailure(ck, card, toPlayerId);
     pushAction(state, `${asker.name} → ${target.name} for ${cardLabel(card)} ✗`);
     state.turnId = toPlayerId;
   }

@@ -84,8 +84,15 @@ function getNextBotName(state: GameState): string {
   return BOT_NAMES[botCount % BOT_NAMES.length];
 }
 
+/** Close code for a socket replaced by the same player opening the game
+ *  elsewhere (another tab/device). Clients must not auto-rejoin on it. */
+export const CLOSE_REPLACED = 4001;
+
 export class LiteratureRoom extends Room<GameState> {
   override maxClients = MAX_PLAYERS;
+  // We dispose ourselves: an all-bots game must survive its humans dropping
+  // for the grace window so they can rejoin (see disposeIfAbandoned).
+  override autoDispose = false;
 
   /** Server-only: each player's hand. Never goes into the schema. */
   private hands: HandStore = new Map();
@@ -100,12 +107,18 @@ export class LiteratureRoom extends Room<GameState> {
    *  seat requires it; it's revoked on a deliberate leave or grace expiry. */
   private seatSecrets = new Map<string, string>();
 
+  /** Bumped on every drop/restore of a seat, so a grace timer from an older
+   *  drop can tell it is stale and must not revoke the seat. */
+  private seatEpoch = new Map<string, number>();
+
   private botTimer: ReturnType<typeof setTimeout> | null = null;
 
   override onCreate(_options: unknown): void {
     this.setState(new GameState());
     this.state.code = generateRoomCode();
     this.roomId = this.state.code;
+    // A created room whose creator never connects shouldn't linger.
+    this.clock.setTimeout(() => this.disposeIfAbandoned(), 60_000);
 
     this.onMessage("ask", (client, msg: AskCommand) => this.handleAsk(client, msg));
     this.onMessage("declare", (client, msg: DeclareCommand) => this.handleDeclare(client, msg));
@@ -142,7 +155,7 @@ export class LiteratureRoom extends Room<GameState> {
         for (const [sid, pid] of this.sessionIdToPlayerId) {
           if (pid !== options.playerId) continue;
           this.sessionIdToPlayerId.delete(sid); // old socket's onLeave becomes a no-op
-          this.clients.find((c) => c.sessionId === sid)?.leave();
+          this.clients.find((c) => c.sessionId === sid)?.leave(CLOSE_REPLACED);
         }
         this.restoreSeat(options.playerId, client);
         return;
@@ -164,7 +177,7 @@ export class LiteratureRoom extends Room<GameState> {
     const player = new Player();
     player.id = playerId;
     player.name = name;
-    player.avatar = options.avatar || pickFreeAvatar(this.state);
+    player.avatar = sanitizeAvatar(options.avatar) || pickFreeAvatar(this.state);
     player.character = sanitizeCharacter(options.character);
     player.team = this.state.players.size % 2 === 0 ? "A" : "B";
     player.isHost = this.state.players.size === 0;
@@ -187,18 +200,24 @@ export class LiteratureRoom extends Room<GameState> {
     this.sendHand(client);
   }
 
-  override async onLeave(client: Client, consented?: boolean): Promise<void> {
+  override onLeave(client: Client, consented?: boolean): void {
+    this.handleLeave(client, !!consented);
+    this.disposeIfAbandoned();
+  }
+
+  private handleLeave(client: Client, consented: boolean): void {
     const playerId = this.sessionIdToPlayerId.get(client.sessionId);
     if (!playerId) return;
     const player = this.state.players.get(playerId);
     if (!player) return;
 
-    // In lobby, leaving is permanent and team is reshuffled.
+    // Outside a game, leaving is permanent. Teams re-balance only in the
+    // lobby, never under the end-screen result.
     if (this.state.status !== "playing") {
       this.removePlayer(playerId);
       pushAction(this.state, `${player.name} left.`);
       this.maybePromoteHost();
-      assignTeams(this.state);
+      if (this.state.status === "lobby") assignTeams(this.state);
       return;
     }
 
@@ -221,18 +240,32 @@ export class LiteratureRoom extends Room<GameState> {
     }
     pushAction(this.state, `${player.name} disconnected. A bot is playing until they're back.`);
 
-    // Native Colyseus reconnect (same sessionId). Rejoin-by-token in onJoin
-    // also works; whichever comes first restores the seat. After the grace
-    // period the bot simply keeps playing — the hand stays in the game.
-    try {
-      const back = await this.allowReconnection(client, RECONNECT_GRACE_S);
-      const p = this.state.players.get(playerId);
-      if (p && !p.connected) this.restoreSeat(playerId, back);
-    } catch {
-      // Grace expired: autopilot keeps the seat for good, unless they already
-      // came back by token in the meantime.
+    // They can rejoin by secret (onJoin) for the grace window; after that the
+    // bot keeps the seat for good. The epoch makes a timer from an earlier
+    // drop harmless once they have come back and dropped again. (No
+    // allowReconnection: the client always rejoins by secret, and its
+    // reserved seats would pile up and lock the room.)
+    const epoch = (this.seatEpoch.get(playerId) ?? 0) + 1;
+    this.seatEpoch.set(playerId, epoch);
+    this.clock.setTimeout(() => {
+      if (this.seatEpoch.get(playerId) !== epoch) return;
       if (this.state.players.get(playerId)?.connected === false) this.seatSecrets.delete(playerId);
+    }, RECONNECT_GRACE_S * 1000);
+  }
+
+  /**
+   * Nobody connected: a lobby or finished room goes now; a live game waits
+   * out the grace window so dropped players can still rejoin it.
+   */
+  private disposeIfAbandoned(): void {
+    if (this.clients.length > 0) return;
+    if (this.state.status !== "playing") {
+      void this.disconnect();
+      return;
     }
+    this.clock.setTimeout(() => {
+      if (this.clients.length === 0) void this.disconnect();
+    }, RECONNECT_GRACE_S * 1000);
   }
 
   /** Hand a seat that's on autopilot back to its human. */
@@ -240,6 +273,7 @@ export class LiteratureRoom extends Room<GameState> {
     const p = this.state.players.get(playerId)!;
     p.connected = true;
     p.isBot = false;
+    this.seatEpoch.set(playerId, (this.seatEpoch.get(playerId) ?? 0) + 1);
     this.sessionIdToPlayerId.set(client.sessionId, playerId);
     if (this.state.turnId === playerId && this.botTimer) {
       clearTimeout(this.botTimer); // the human takes their own turn
@@ -471,6 +505,9 @@ export class LiteratureRoom extends Room<GameState> {
     if (!this.requireHost(client)) return;
     if (this.botTimer) clearTimeout(this.botTimer);
     resetToLobby(this.state, this.hands, this.transactions);
+    for (const id of this.seatSecrets.keys()) {
+      if (!this.state.players.has(id)) this.seatSecrets.delete(id);
+    }
     this.pushAllHands();
   }
 
@@ -556,6 +593,11 @@ function botsToAdd(playerCount: number): number {
   if (playerCount === 0 || playerCount === 1) return Math.max(MIN_PLAYERS - playerCount, 1);
   if (playerCount % 2 === 1) return 1;
   return 2;
+}
+
+/** Only our palette colors: the value is rendered into a style attribute. */
+function sanitizeAvatar(input: unknown): string {
+  return AVATAR_COLORS.includes(input as (typeof AVATAR_COLORS)[number]) ? (input as string) : "";
 }
 
 function pickFreeAvatar(state: GameState): string {

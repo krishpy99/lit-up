@@ -180,6 +180,13 @@ class GameClient {
   private reconnectToken = "";
   /** Bumped by create/join/leave so an in-flight auto-rejoin knows to stop. */
   private rejoinGen = 0;
+  /** True while we hold a seat in a running game. Survives the reset in
+   *  onLeave, so a drop right after a rejoin (before state arrives) still
+   *  triggers another rejoin. */
+  private inGame = false;
+  /** Set by "welcome": the hand that follows a (re)join must show at once —
+   *  no state patch may follow it to flush a staged hand. */
+  private applyNextHandNow = false;
   private _pendingAvatar = "";
   private _pendingCharacter = "";
 
@@ -313,15 +320,33 @@ class GameClient {
     try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
   }
 
-  /** Called on app mount — silently reconnects if a saved session exists.
-   *  `retryForMs` > 0 keeps retrying network failures (with backoff) for that
-   *  long, e.g. the server's seat-hold window after a connection drop. */
-  async tryAutoReconnect(retryForMs = 0): Promise<void> {
-    let s: StoredSession | null = null;
+  private storedSession(): StoredSession | null {
     try {
       const raw = localStorage.getItem(SESSION_KEY);
-      if (raw) s = JSON.parse(raw) as StoredSession;
-    } catch { /* corrupt data */ }
+      return raw ? (JSON.parse(raw) as StoredSession) : null;
+    } catch {
+      return null; // corrupt data / storage unavailable
+    }
+  }
+
+  /** The seat this tab holds right now (independent of other tabs). */
+  private currentSession(): StoredSession {
+    return {
+      roomCode: this.roomCode,
+      playerId: this.playerId,
+      reconnectToken: this.reconnectToken,
+      name: this._pendingName,
+      avatar: this._pendingAvatar,
+      character: this._pendingCharacter,
+    };
+  }
+
+  /** Silently rejoin a seat: on app mount from the saved session, or after
+   *  a drop from this tab's own seat (`session`), so one tab never grabs a
+   *  seat that another tab saved. `retryForMs` > 0 keeps retrying transient
+   *  failures (with backoff) for that long — the server's seat-hold window. */
+  async tryAutoReconnect(retryForMs = 0, session?: StoredSession): Promise<void> {
+    const s = session ?? this.storedSession();
     if (!s?.roomCode || !s?.playerId || !s?.name) return;
 
     const gen = ++this.rejoinGen;
@@ -340,22 +365,28 @@ class GameClient {
           playerId: s.playerId,
           reconnectToken: s.reconnectToken,
         } satisfies JoinOptions);
-        if (gen !== this.rejoinGen) { room.leave(true); return; } // user moved on
+        // User moved on meanwhile: drop it as a *disconnect* (not a leave),
+        // so the server keeps the seat and its secret for the grace window.
+        if (gen !== this.rejoinGen) { room.leave(false); return; }
+        this.inGame = true;
         this.bindRoom(room);
         return;
       } catch (err) {
         if (gen !== this.rejoinGen) return;
-        // A numeric code means the server answered (room gone, seat refused):
-        // give up for good. Anything else is the network — keep trying.
-        serverSaidNo = typeof (err as { code?: unknown })?.code === "number";
+        // Give up only on a definite refusal: our onJoin said no (4216) or
+        // the room is gone (4212). HTTP 5xx/429, socket closes and expired
+        // seat reservations are transient — keep backing off.
+        const code = (err as { code?: unknown })?.code;
+        serverSaidNo = code === 4216 || code === 4212;
         if (serverSaidNo || Date.now() + delay > deadline) break;
         await new Promise((r) => setTimeout(r, delay));
         if (gen !== this.rejoinGen) return;
       }
     }
-    // Only forget the seat if the server refused it; on a plain network
-    // failure keep it so a later refresh can still get back in.
-    if (serverSaidNo) this.clearSession();
+    // Only forget the seat if the server refused it, and only if it's still
+    // the one we tried (another tab may have saved a different seat since).
+    if (serverSaidNo && this.storedSession()?.playerId === s.playerId) this.clearSession();
+    this.inGame = false;
     this.status = "idle";
   }
 
@@ -366,7 +397,7 @@ class GameClient {
       this.errorBanner = "Enter a name to host.";
       return;
     }
-    this.rejoinGen++;
+    const gen = ++this.rejoinGen;
     this._pendingName = name.trim();
     this._pendingAvatar = avatar;
     this._pendingCharacter = character;
@@ -378,6 +409,7 @@ class GameClient {
         avatar,
         character,
       } satisfies JoinOptions);
+      if (gen !== this.rejoinGen) { room.leave(true); return; } // superseded (e.g. double click)
       this.bindRoom(room);
     } catch (err) {
       this.status = "error";
@@ -396,7 +428,14 @@ class GameClient {
       this.errorBanner = "Enter a room code.";
       return;
     }
-    this.rejoinGen++;
+    // Re-entering the code of the game we hold a seat in = rejoin that seat
+    // (a plain join is refused mid-game), with the usual retry/backoff.
+    const saved = this.storedSession();
+    if (saved?.roomCode === normCode && saved.reconnectToken) {
+      this.errorBanner = "";
+      return this.tryAutoReconnect(5 * 60_000, saved);
+    }
+    const gen = ++this.rejoinGen;
     this._pendingName = trimmedName;
     this._pendingAvatar = avatar;
     this._pendingCharacter = character;
@@ -408,6 +447,7 @@ class GameClient {
         avatar,
         character,
       } satisfies JoinOptions);
+      if (gen !== this.rejoinGen) { room.leave(true); return; } // superseded
       this.bindRoom(room);
     } catch (err) {
       this.status = "error";
@@ -417,6 +457,7 @@ class GameClient {
 
   leave(): void {
     this.rejoinGen++;
+    this.inGame = false;
     this.clearSession();
     this.room?.leave(true);
     this.room = null;
@@ -508,12 +549,16 @@ class GameClient {
   private bindRoom(room: Room<unknown>): void {
     this.room = room;
 
+    // Every handler ignores rooms we've since left or replaced, so a stale or
+    // duplicate room can never drive the UI or overwrite the saved session.
     room.onStateChange((state) => {
+      if (this.room !== room) return;
       const next = snapshotRoom(state);
       this.room$ = next;
       // Keep view in sync with room status.
       const status = (state as { status: GameStatus }).status;
       this.view = status === "lobby" ? "lobby" : "game";
+      this.inGame = status === "playing";
 
       // Classify what animation (if any) this transition requires, using the
       // last snapshot that is currently visible or queued as the "previous" state.
@@ -541,15 +586,26 @@ class GameClient {
     });
 
     room.onMessage("welcome", (msg: WelcomeMessage) => {
+      if (this.room !== room) return;
       this.playerId = msg.playerId;
       this.roomCode = msg.roomCode;
       this.reconnectToken = msg.reconnectToken;
       this.status = "connected";
+      this.applyNextHandNow = true;
       this.saveSession();
     });
 
     room.onMessage("hand", (msg: { hand: Card[] }) => {
-      // Always stage the hand update. The server sends "hand" messages before
+      if (this.room !== room) return;
+      // The hand right after "welcome" (a join or rejoin) shows at once: the
+      // full state already arrived and no patch may follow to flush it.
+      if (this.applyNextHandNow && this.eventQueue.length === 0) {
+        this.applyNextHandNow = false;
+        this.hand = msg.hand;
+        this.pendingHand = null;
+        return;
+      }
+      // Otherwise stage it. The server sends "hand" messages before
       // broadcasting the schema state change (Colyseus flushes schema patches
       // at the end of the request cycle, after explicit client.send() calls).
       // Staging here ensures the hand fan and card counts advance together
@@ -558,17 +614,26 @@ class GameClient {
     });
 
     room.onMessage("error", (msg: { message: string }) => {
+      if (this.room !== room) return;
       this.toast(msg.message, "error");
     });
 
     room.onLeave((code) => {
       if (this.room !== room) return; // stale room (we already left/rebound)
-      const wasPlaying = this.room$?.status === "playing";
       if (this.room$?.status === "ended") this.clearSession();
-      // 4000 = we left on purpose. Anything else mid-game is a network drop:
-      // a bot holds the seat, so quietly rejoin it.
-      const rejoin = code !== 4000 && wasPlaying;
-      this.toast(rejoin ? "Connection lost — rejoining…" : "Disconnected from room.", "warn");
+      // 4000 = we left on purpose. 4001 = this seat was opened in another
+      // tab/device, which now owns it: rejoining would just steal it back.
+      // Anything else mid-game is a network drop: a bot holds the seat, so
+      // quietly rejoin it — with this tab's own seat, not whatever another
+      // tab saved to localStorage.
+      const replaced = code === 4001;
+      const rejoin = code !== 4000 && !replaced && this.inGame;
+      const mySeat = this.currentSession();
+      this.toast(
+        replaced ? "This game was opened in another tab." :
+        rejoin ? "Connection lost — rejoining…" : "Disconnected from room.",
+        "warn",
+      );
       this.room = null;
       this.room$ = null;
       this.visibleRoom$ = null;
@@ -579,7 +644,8 @@ class GameClient {
       this.headHandApplied = false;
       this.status = "idle";
       this.view = "landing";
-      if (rejoin) void this.tryAutoReconnect(5 * 60_000); // server holds the seat 5 min
+      if (rejoin) void this.tryAutoReconnect(5 * 60_000, mySeat); // server holds the seat 5 min
+      else this.inGame = false;
     });
 
     room.onError((_code, message) => {
